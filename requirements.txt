@@ -1,0 +1,14 @@
+Django>=5.0
+google-genai
+sounddevice>=0.4.6
+simpleaudio>=1.0.4
+python-dotenv>=1.0.1
+SpeechRecognition
+python-dotenv
+pyaudio
+elevenlabs
+pydub
+requests
+google-generativeai
+pypiwin32
+pyttsx3
