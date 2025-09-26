@@ -8,11 +8,11 @@ from django.core.management.base import BaseCommand
 import base64
 import warnings
 import sys
+import time
 
 # --- Quiet the repeated SDK inline_data warning (two-layer) ---
 warnings.filterwarnings("ignore", message=r".*non-text parts in the response.*inline_data.*")
 _orig_stderr_write = sys.stderr.write
-
 
 def _stderr_write_filter(s):
     try:
@@ -24,13 +24,11 @@ def _stderr_write_filter(s):
         pass
     return _orig_stderr_write(s)
 
-
 sys.stderr.write = _stderr_write_filter
 
 # reduce SDK logging noise
 logging.getLogger("google.genai").setLevel(logging.WARNING)
 logging.getLogger("genai").setLevel(logging.WARNING)
-
 
 # --- Fallback fake client if google.genai isn't installed (keeps file runnable) ---
 try:
@@ -58,7 +56,6 @@ except ImportError:
             return _AIO()
     genai = FakeClient()
 
-
 # audio constants
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
@@ -67,15 +64,17 @@ RECV_RATE = 24000
 CHUNK = 1024
 
 MODEL = "models/gemini-2.0-flash-exp"
+
+# CORRECTED CONFIG - Add output_audio_transcription to get text of what Gemini says
 CONFIG = {
     "generation_config": {"response_modalities": ["AUDIO"]},
     "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": "Puck"}}},
-    "input_audio_transcription": {},
+    "input_audio_transcription": {},      # This transcribes what you say
+    "output_audio_transcription": {},     # This transcribes what Gemini says back
 }
 
 client = genai.Client(api_key=getattr(settings, "GEMINI_API_KEY", None),
                       http_options={"api_version": "v1alpha"})
-
 
 class AudioLoop:
     def __init__(self, pya_instance, stdout):
@@ -87,6 +86,13 @@ class AudioLoop:
         self.session = None
         self._stop = asyncio.Event()
         self.tasks = []
+
+        # Transcription buffering
+        self.user_transcription_buffer = ""
+        self.gemini_transcription_buffer = ""
+        self.last_user_transcription_time = 0
+        self.last_gemini_transcription_time = 0
+        self.transcription_timeout = 1.5  # seconds to wait before printing partial transcription
 
     async def listen_audio(self):
         # open mic once and stream
@@ -132,6 +138,37 @@ class AudioLoop:
                 await self.received.put(base64.b64decode(data))
             except Exception:
                 pass
+
+    def _should_print_transcription(self, buffer, last_time, current_text):
+        """Determine if we should print the transcription buffer"""
+        current_time = time.time()
+
+        # If we have a substantial amount of text or enough time has passed
+        if (len(current_text.strip()) > 20 or 
+            current_time - last_time > self.transcription_timeout or
+            current_text.endswith('.') or 
+            current_text.endswith('?') or 
+            current_text.endswith('!')):
+            return True
+        return False
+
+    async def _flush_transcription_buffers(self):
+        """Periodically flush transcription buffers if they contain text"""
+        while not self._stop.is_set():
+            await asyncio.sleep(self.transcription_timeout)
+            current_time = time.time()
+
+            # Flush user transcription if it's been sitting too long
+            if (self.user_transcription_buffer.strip() and 
+                current_time - self.last_user_transcription_time > self.transcription_timeout):
+                self.stdout.write(f"You: {self.user_transcription_buffer.strip()}\n")
+                self.user_transcription_buffer = ""
+
+            # Flush Gemini transcription if it's been sitting too long
+            if (self.gemini_transcription_buffer.strip() and 
+                current_time - self.last_gemini_transcription_time > self.transcription_timeout):
+                self.stdout.write(f"Gemini: {self.gemini_transcription_buffer.strip()}\n")
+                self.gemini_transcription_buffer = ""
 
     async def receive_audio(self):
         while not self._stop.is_set():
@@ -183,23 +220,45 @@ class AudioLoop:
                         except Exception:
                             pass
 
-                    # 3) print user transcription if present
+                    # 3) BUFFERED: Handle user transcription
                     if server_content and hasattr(server_content, "input_transcription"):
-                        txt = getattr(server_content.input_transcription, "text", None)
-                        if txt:
-                            self.stdout.write(f"You: {txt}\n")
+                        input_transcription = getattr(server_content, "input_transcription", None)
+                        if input_transcription:
+                            txt = getattr(input_transcription, "text", None)
+                            if txt:
+                                self.user_transcription_buffer = txt
+                                self.last_user_transcription_time = time.time()
 
-                    # 4) print model text parts
+                                if self._should_print_transcription(self.user_transcription_buffer, 
+                                                                  self.last_user_transcription_time, txt):
+                                    self.stdout.write(f"You: {txt.strip()}\n")
+                                    self.user_transcription_buffer = ""
+
+                    # 4) BUFFERED: Handle Gemini's speech transcription
+                    if server_content and hasattr(server_content, "output_transcription"):
+                        output_transcription = getattr(server_content, "output_transcription", None)
+                        if output_transcription:
+                            txt = getattr(output_transcription, "text", None)
+                            if txt:
+                                self.gemini_transcription_buffer = txt
+                                self.last_gemini_transcription_time = time.time()
+
+                                if self._should_print_transcription(self.gemini_transcription_buffer, 
+                                                                   self.last_gemini_transcription_time, txt):
+                                    self.stdout.write(f"Gemini: {txt.strip()}\n")
+                                    self.gemini_transcription_buffer = ""
+
+                    # 5) print model text parts (this will likely be empty with audio-only mode)
                     if parts:
                         for part in parts:
                             if hasattr(part, "text") and part.text:
                                 self.stdout.write(f"Gemini: {part.text}\n")
 
-                    # 5) response.text fallback
+                    # 6) response.text fallback (this will likely be empty with audio-only mode)
                     if hasattr(response, "text") and response.text:
                         self.stdout.write(f"Gemini: {response.text}\n")
 
-                    # 6) response.data / output_audio fallbacks
+                    # 7) response.data / output_audio fallbacks
                     if hasattr(response, "data") and response.data:
                         data = response.data
                         if isinstance(data, (bytes, bytearray)):
@@ -275,6 +334,7 @@ class AudioLoop:
                     asyncio.create_task(self.send_realtime()),
                     asyncio.create_task(self.receive_audio()),
                     asyncio.create_task(self.play_audio()),
+                    asyncio.create_task(self._flush_transcription_buffers()),  # Add buffer flushing task
                 ]
                 # wait until stop event is set
                 await self._stop.wait()
@@ -295,7 +355,6 @@ class AudioLoop:
 
     async def stop(self):
         self._stop.set()
-
 
 class Command(BaseCommand):
     help = "Starts a real-time voice chat with Gemini AI."
