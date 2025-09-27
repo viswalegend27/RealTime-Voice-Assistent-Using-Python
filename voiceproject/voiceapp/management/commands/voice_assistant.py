@@ -1,15 +1,17 @@
+# FILE: voiceproject/voiceapp/management/commands/voice_assistant.py
 import asyncio
 import traceback
 import logging
 import pyaudio
 import base64
 import time
+import re
 from django.conf import settings
 from django.core.management.base import BaseCommand
 from google import genai
 
 # Import custom agent prompt
-from .prompts import AGENT_PROMPT  # 👈 ADDED
+from .prompts import AGENT_PROMPT
 
 # Silence verbose logs
 logging.getLogger("google.genai").setLevel(logging.WARNING)
@@ -25,15 +27,48 @@ CONFIG = {
     "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": "Puck"}}},
     "input_audio_transcription": {},
     "output_audio_transcription": {},
-        "system_instruction": {
-        "parts": [{"text": AGENT_PROMPT.strip()}]
-    }
+    "system_instruction": {"parts": [{"text": AGENT_PROMPT.strip()}]},
 }
 
 client = genai.Client(
     api_key=getattr(settings, "GEMINI_API_KEY", None),
-    http_options={"api_version": "v1alpha"}
+    http_options={"api_version": "v1alpha"},
 )
+
+
+def normalize_transcript(s: str) -> str:
+    if not s:
+        return s
+    s = re.sub(r"\s+", " ", s).strip()
+
+    # Split and join single-letter runs into words
+    tokens = s.split(" ")
+    out = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if len(t) == 1 and t.isalpha():
+            # collect run
+            letters = [t]
+            i += 1
+            while i < len(tokens) and len(tokens[i]) == 1 and tokens[i].isalpha():
+                letters.append(tokens[i]); i += 1
+            if len(letters) >= 2:
+                out.append("".join(letters))
+            else:
+                out.append(letters[0])
+        else:
+            out.append(t); i += 1
+    s = " ".join(out)
+
+    # Fix spacing around punctuation and contractions
+    s = re.sub(r"\s+([,?.!;:])", r"\1", s)           # remove space before punctuation
+    s = re.sub(r"\s+'", "'", s)                     # space before apostrophe
+    s = re.sub(r"'\s+", "'", s)                     # space after apostrophe
+    s = re.sub(r"\s+\"", "\"", s)                   # space before quote
+    s = re.sub(r"\" \s+", "\"", s)                  # space after quote (best-effort)
+    s = re.sub(r"\s{2,}", " ", s)                   # collapse any leftover multi-space
+    return s.strip()
 
 
 class AudioLoop:
@@ -46,17 +81,21 @@ class AudioLoop:
         self.tasks = []
         self.user_buffer = self.gemini_buffer = ""
         self.last_user_time = self.last_gemini_time = 0
-        self.timeout = 1.0
+        self.timeout = 1.5
         self.prompt_injected = True  # 👈 Track if prompt sent
 
     async def listen_audio(self):
         mic_info = self.pya.get_default_input_device_info()
         self.audio_stream = await asyncio.to_thread(
-            self.pya.open, format=FORMAT, channels=CHANNELS, rate=SEND_RATE,
-            input=True, input_device_index=mic_info.get("index"), frames_per_buffer=CHUNK
+            self.pya.open,
+            format=FORMAT,
+            channels=CHANNELS,
+            rate=SEND_RATE,
+            input=True,
+            input_device_index=mic_info.get("index"),
+            frames_per_buffer=CHUNK,
         )
         self.stdout.write("🎙️ Microphone ready. Listening...\n")
-
         while not self._stop.is_set():
             try:
                 data = await asyncio.to_thread(self.audio_stream.read, CHUNK, exception_on_overflow=False)
@@ -70,7 +109,6 @@ class AudioLoop:
         while not self._stop.is_set():
             try:
                 msg = await self.to_send.get()
-                
                 await self.session.send(input=msg)
             except asyncio.CancelledError:
                 break
@@ -81,23 +119,21 @@ class AudioLoop:
     def should_print(self, text, last_time):
         now = time.time()
         clean = text.strip()
-        return len(clean) > 5 and (now - last_time > self.timeout or clean.endswith(('.', '?', '!')))
+        return len(clean) > 3 and (now - last_time > self.timeout or clean.endswith((".", "?", "!")))
 
     async def flush_buffers(self):
         while not self._stop.is_set():
             await asyncio.sleep(self.timeout)
             now = time.time()
-
             if self.user_buffer.strip() and now - self.last_user_time > self.timeout:
                 full = self.user_buffer.strip()
                 if self.should_print(full, self.last_user_time):
-                    self.stdout.write(f"🧑 You: {full}\n")
+                    self.stdout.write(f"🧑 You: {normalize_transcript(full)}\n")
                 self.user_buffer = ""
-
             if self.gemini_buffer.strip() and now - self.last_gemini_time > self.timeout:
                 full = self.gemini_buffer.strip()
                 if self.should_print(full, self.last_gemini_time):
-                    self.stdout.write(f"🤖 Gemini: {full}\n")
+                    self.stdout.write(f"🤖 Gemini: {normalize_transcript(full)}\n")
                 self.gemini_buffer = ""
 
     async def receive_audio(self):
@@ -105,9 +141,10 @@ class AudioLoop:
             try:
                 async for response in self.session.receive():
                     sc = getattr(response, "server_content", None)
-                    if not sc: continue
+                    if not sc:
+                        continue
 
-                    # Handle audio output
+                    # Handle audio output (inline_data)
                     mt = getattr(sc, "model_turn", None)
                     if mt:
                         for part in (getattr(mt, "parts", []) or []):
@@ -116,14 +153,16 @@ class AudioLoop:
                                 audio = bytes(data) if isinstance(data, (bytes, bytearray)) else base64.b64decode(data)
                                 await self.received.put(audio)
 
-                    # Handle transcriptions
+                    # Handle user transcription
                     if hasattr(sc, "input_transcription") and (txt := getattr(sc.input_transcription, "text", "")):
-                        clean_txt = txt.strip()
-                        self.user_buffer += " " + clean_txt
+                        norm = normalize_transcript(txt.strip())
+                        self.user_buffer += " " + norm
                         self.last_user_time = time.time()
 
+                    # Handle model output transcription
                     if hasattr(sc, "output_transcription") and (txt := getattr(sc.output_transcription, "text", "")):
-                        self.gemini_buffer += " " + txt.strip()
+                        norm = normalize_transcript(txt.strip())
+                        self.gemini_buffer += " " + norm
                         self.last_gemini_time = time.time()
 
                     await asyncio.sleep(0.05)
@@ -138,8 +177,9 @@ class AudioLoop:
         while not self._stop.is_set():
             try:
                 if not stream:
-                    stream = await asyncio.to_thread(self.pya.open, format=FORMAT, channels=CHANNELS,
-                                                    rate=RECV_RATE, output=True)
+                    stream = await asyncio.to_thread(
+                        self.pya.open, format=FORMAT, channels=CHANNELS, rate=RECV_RATE, output=True
+                    )
                     self.stdout.write("🔊 Playback active.\n")
                 chunk = await self.received.get()
                 if isinstance(chunk, bytes) and chunk:
@@ -149,7 +189,8 @@ class AudioLoop:
             except Exception as e:
                 self.stdout.write(f"🔈 Playback error: {e}\n")
                 await asyncio.sleep(0.1)
-        if stream: stream.close()
+        if stream:
+            stream.close()
 
     async def run(self):
         try:
@@ -157,6 +198,7 @@ class AudioLoop:
                 self.session = session
                 self.stdout.write("💬 Voice chat started — press Ctrl+C to stop.\n")
 
+                # (unchanged) tasks
                 self.tasks = [
                     asyncio.create_task(self.listen_audio()),
                     asyncio.create_task(self.send_audio()),
@@ -164,15 +206,15 @@ class AudioLoop:
                     asyncio.create_task(self.play_audio()),
                     asyncio.create_task(self.flush_buffers()),
                 ]
-
                 await self._stop.wait()
-                for t in self.tasks: t.cancel()
+                for t in self.tasks:
+                    t.cancel()
                 await asyncio.gather(*self.tasks, return_exceptions=True)
-
         except Exception as e:
             self.stdout.write(f"💥 Run error: {e}\n")
         finally:
-            if self.audio_stream: self.audio_stream.close()
+            if self.audio_stream:
+                self.audio_stream.close()
             self.stdout.write("👋 Session ended.\n")
 
     async def stop(self):
