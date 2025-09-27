@@ -8,6 +8,9 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 from google import genai
 
+# Import custom agent prompt
+from .prompts import AGENT_PROMPT  # 👈 ADDED
+
 # Silence verbose logs
 logging.getLogger("google.genai").setLevel(logging.WARNING)
 logging.getLogger("genai").setLevel(logging.WARNING)
@@ -22,6 +25,9 @@ CONFIG = {
     "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": "Puck"}}},
     "input_audio_transcription": {},
     "output_audio_transcription": {},
+        "system_instruction": {
+        "parts": [{"text": AGENT_PROMPT.strip()}]
+    }
 }
 
 client = genai.Client(
@@ -40,7 +46,8 @@ class AudioLoop:
         self.tasks = []
         self.user_buffer = self.gemini_buffer = ""
         self.last_user_time = self.last_gemini_time = 0
-        self.timeout = 1.5
+        self.timeout = 1.0
+        self.prompt_injected = True  # 👈 Track if prompt sent
 
     async def listen_audio(self):
         mic_info = self.pya.get_default_input_device_info()
@@ -63,6 +70,7 @@ class AudioLoop:
         while not self._stop.is_set():
             try:
                 msg = await self.to_send.get()
+                
                 await self.session.send(input=msg)
             except asyncio.CancelledError:
                 break
@@ -110,7 +118,8 @@ class AudioLoop:
 
                     # Handle transcriptions
                     if hasattr(sc, "input_transcription") and (txt := getattr(sc.input_transcription, "text", "")):
-                        self.user_buffer += " " + txt.strip()
+                        clean_txt = txt.strip()
+                        self.user_buffer += " " + clean_txt
                         self.last_user_time = time.time()
 
                     if hasattr(sc, "output_transcription") and (txt := getattr(sc.output_transcription, "text", "")):
@@ -130,7 +139,7 @@ class AudioLoop:
             try:
                 if not stream:
                     stream = await asyncio.to_thread(self.pya.open, format=FORMAT, channels=CHANNELS,
-                                                     rate=RECV_RATE, output=True)
+                                                    rate=RECV_RATE, output=True)
                     self.stdout.write("🔊 Playback active.\n")
                 chunk = await self.received.get()
                 if isinstance(chunk, bytes) and chunk:
