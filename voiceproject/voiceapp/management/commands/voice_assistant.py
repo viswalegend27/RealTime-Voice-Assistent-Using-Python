@@ -1,4 +1,3 @@
-# FILE: voiceproject/voiceapp/management/commands/voice_assistant.py
 import asyncio
 import traceback
 import logging
@@ -12,7 +11,6 @@ from asgiref.sync import sync_to_async
 
 # Import your models
 from voiceapp.models import Conversation, Message
-
 from google import genai
 
 # Import custom agent prompt
@@ -84,6 +82,7 @@ def normalize_transcript(s: str) -> str:
 
 
 # --- Database Helper Functions ---
+# --- Handler Functions --
 def _create_conversation_sync():
     """Synchronous function to create a new conversation."""
     return str(Conversation.objects.create().id)
@@ -127,7 +126,6 @@ def _get_or_create_latest_conversation_sync():
         return str(latest.id)
     else:
         return str(Conversation.objects.create().id)
-
 
 
 # --- ASYNC wrappers using sync_to_async ---
