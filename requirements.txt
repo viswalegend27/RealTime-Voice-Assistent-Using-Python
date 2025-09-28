@@ -14,3 +14,4 @@ pypiwin32
 pyttsx3
 channels 
 channels-redis
+aiohttp
