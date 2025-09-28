@@ -14,7 +14,7 @@ def _save(convo_id, role, content):
                 role='user' if role == 'user' else 'assistant',
                 content=content.strip()
             )
-        except: pass
+        except: pass  # noqa: E701, E722
 
 def _summary(convo_id):
     try:
@@ -23,7 +23,7 @@ def _summary(convo_id):
         msgs.reverse()
         lines = [f"{'User' if m.role=='user' else 'Assistant'}: {m.content}" for m in msgs]
         return "Previous conversation:\n" + "\n".join(lines) if lines else "No prior conversation."
-    except:
+    except:  # noqa: E722
         return "No prior conversation."
 
 def _latest():

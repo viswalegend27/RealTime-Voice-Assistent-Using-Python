@@ -38,7 +38,8 @@ client = genai.Client(
 )
 
 def normalize_transcript(s):
-    if not s: return s
+    if not s: 
+        return s
     s = re.sub(r"\s+", " ", s).strip()
     
     # Join single letters into words
@@ -135,9 +136,7 @@ class AudioLoop:
                     if not sc:
                         continue
 
-                    # Handle audio output and text extraction
-                    mt = getattr(sc, "model_turn", None)
-                    if mt:
+                    if mt := getattr(sc, "model_turn", None):
                         for part in (getattr(mt, "parts", []) or []):
                             # Handle audio playback
                             blob = getattr(part, "inline_data", None) or getattr(part, "inlineData", None)
@@ -148,19 +147,19 @@ class AudioLoop:
                             # Handle CLEAN text response (null-safe)
                             text_content = getattr(part, "text", None)
                             if text_content is not None and isinstance(text_content, str) and text_content.strip():
-                                self.gemini_buffer += " " + text_content.strip()
+                                self.gemini_buffer += f" {text_content.strip()}"
                                 self.last_gemini_time = time.time()
 
                     # Handle user transcription
                     if hasattr(sc, "input_transcription") and (txt := getattr(sc.input_transcription, "text", "")):
                         norm = normalize_transcript(txt.strip())
-                        self.user_buffer += " " + norm
+                        self.user_buffer += f" {norm}"
                         self.last_user_time = time.time()
                     if hasattr(sc, "output_transcription") and (txt := getattr(sc.output_transcription, "text", "")):
                         norm = normalize_transcript(txt.strip())
-                        self.gemini_buffer += " " + norm
+                        self.gemini_buffer += f" {norm}"
                         self.last_gemini_time = time.time()
-                        
+
                 await asyncio.sleep(0.05)
             except asyncio.CancelledError:
                 return
@@ -185,7 +184,8 @@ class AudioLoop:
             except Exception as e:
                 self.stdout.write(f"🔈 Playback error: {e}\n")
                 await asyncio.sleep(0.1)
-        if stream: stream.close()
+        if stream: 
+            stream.close()
 
     async def run(self):
         try:
@@ -210,12 +210,14 @@ class AudioLoop:
                     asyncio.create_task(self.flush_buffers()),
                 ]
                 await self._stop.wait()
-                for t in tasks: t.cancel()
+                for t in tasks: 
+                    t.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
         except Exception as e:
             self.stdout.write(f"💥 Run error: {e}\n")
         finally:
-            if self.audio_stream: self.audio_stream.close()
+            if self.audio_stream: 
+                self.audio_stream.close()
             self.stdout.write("👋 Session ended.\n")
 
     async def stop(self):
