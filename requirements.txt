@@ -15,3 +15,4 @@ pyttsx3
 channels 
 channels-redis
 aiohttp
+daphne
