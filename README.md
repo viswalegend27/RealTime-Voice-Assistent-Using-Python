@@ -204,6 +204,18 @@ sudo apt-get install libasound2-dev
 - On macOS: System Preferences → Privacy & Security → Microphone
 - On Windows: Settings → Privacy → Microphone
 
+**6. "If you deleted database"**
+- Always do the migration
+- If not done the database won't be read
+```bash
+python manage.py migrate
+```
+```bash
+python manage.py shell -c "from django.db import connection; print('voiceapp_conversation' in connection.introspection.table_names())"
+```
+```bash
+python manage.py voice_assistant
+```
 ### Audio Issues
 
 **Feedback/Echo:**

@@ -1,2 +1,3 @@
 /.env
 /ai-speech
+/voiceproject/db.sqlite3
