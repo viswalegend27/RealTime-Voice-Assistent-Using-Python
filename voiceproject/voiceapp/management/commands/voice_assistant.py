@@ -11,34 +11,34 @@ from voiceapp.models import Conversation, Message
 from google import genai
 from .prompts import AGENT_PROMPT
 
-# Silence verbose logs
+# Silence the verbose logs
 for logger in ["google.genai", "genai"]:
     logging.getLogger(logger).setLevel(logging.WARNING)
 
-# Audio configuration
+# Audio configuration or the standards in the audio is recieved
 FORMAT, CHANNELS, CHUNK = pyaudio.paInt16, 1, 1024
 SEND_RATE, RECV_RATE = 16000, 24000
 MODEL = "models/gemini-2.0-flash-exp"
 
-# Initialize client
+# Setting up the google client
 client = genai.Client(
     api_key=getattr(settings, "GEMINI_API_KEY", None),
     http_options={"api_version": "v1alpha"}
 )
 
+# Function to normalize the transcript
 def normalize_transcript(text):
-    """Clean up transcript text"""
     if not text:
         return text
     
-    # Basic cleanup
+    # Cleanup the empty spaces
     text = re.sub(r'\s+', ' ', text).strip()
     
     # Join single letters into words
     tokens = text.split()
     result = []
     i = 0
-    
+    # This code segment processes a list called tokens and merges consecutive single-letter tokens into full words, while leaving other tokens unchanged.
     while i < len(tokens):
         if len(tokens[i]) == 1 and tokens[i].isalpha():
             letters = [tokens[i]]
@@ -67,9 +67,13 @@ def normalize_transcript(text):
 
 class AudioLoop:
     def __init__(self, pya_instance, stdout):
+        # Declaring pyAudio instance
         self.pya = pya_instance
+        # Creating output variable
         self.stdout = stdout
+        # Queue for sending
         self.to_send = asyncio.Queue(maxsize=10)
+        # Queue for recieving
         self.received = asyncio.Queue()
         self.audio_stream = None
         self.session = None
@@ -78,10 +82,10 @@ class AudioLoop:
         self.gemini_buffer = ""
         self.last_user_time = 0
         self.last_gemini_time = 0
-        self.timeout = 0.5
+        self.timeout = 1.5
         self.conversation_id = None
         
-        # Database operations
+        # Database injections.
         self.db_ops = {
             'create_conversation': sync_to_async(lambda: str(Conversation.objects.create().id)),
             'save_message': sync_to_async(self._save_message),
@@ -93,8 +97,8 @@ class AudioLoop:
             )
         }
     
+    # Function helps to save messages into our ID
     def _save_message(self, conversation_id, role, content):
-        """Save message to database"""
         if content and content.strip():
             try:
                 Message.objects.create(
@@ -106,11 +110,10 @@ class AudioLoop:
                 self.stdout.write(f"⚠️ DB Save Error: {e}\n")
     
     def _get_history(self, conversation_id):
-        """Get conversation history"""
         try:
             messages = Message.objects.filter(
                 conversation_id=conversation_id
-            ).order_by('-timestamp')[:6]
+            ).order_by('-timestamp')[:6] # Gets the last sex messages
             
             history = [f"{'User' if m.role == 'user' else 'Assistant'}: {m.content}" 
                     for m in reversed(messages)]
@@ -120,7 +123,6 @@ class AudioLoop:
             return "No prior conversation."
     
     async def listen_audio(self):
-        """Capture audio from microphone"""
         mic_info = self.pya.get_default_input_device_info()
         self.audio_stream = await asyncio.to_thread(
             self.pya.open,
@@ -139,6 +141,7 @@ class AudioLoop:
                 if data:
                     await self.to_send.put({
                         "data": data, 
+                        # Multipurpose internet media extensions or A media type format
                         "mime_type": f"audio/pcm;rate={SEND_RATE}"
                     })
             except Exception as e:
@@ -151,7 +154,8 @@ class AudioLoop:
         async def send():
             while not self._stop.is_set():
                 try:
-                    await self.session.send(input=await self.to_send.get())
+                    # Asynchornous operation to capture our information and send to gemini
+                    await self.session.send(input=await self.to_send.get()) # data to be sent
                 except Exception as e:
                     if not isinstance(e, asyncio.CancelledError):
                         self.stdout.write(f"📤 Send error: {e}\n")
@@ -176,6 +180,7 @@ class AudioLoop:
                                         await self.received.put(audio)
                         
                         # Process transcriptions
+                        # Setting the transcriptions
                         for attr, buffer_attr, time_attr in [
                             ("input_transcription", "user_buffer", "last_user_time"),
                             ("output_transcription", "gemini_buffer", "last_gemini_time")

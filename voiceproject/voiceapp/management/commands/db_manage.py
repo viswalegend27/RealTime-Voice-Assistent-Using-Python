@@ -19,7 +19,9 @@ def _save(convo_id, role, content):
 def _summary(convo_id):
     try:
         convo = Conversation.objects.get(id=convo_id)
+        # Captures newest to the oldest
         msgs = list(convo.messages.order_by('-timestamp')[:6])
+        # Reverses them to oldest to newest
         msgs.reverse()
         lines = [f"{'User' if m.role=='user' else 'Assistant'}: {m.content}" for m in msgs]
         return "Previous conversation:\n" + "\n".join(lines) if lines else "No prior conversation."
