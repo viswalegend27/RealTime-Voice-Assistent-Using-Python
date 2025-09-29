@@ -18,3 +18,6 @@ def start_assistant(request):
 def stop_assistant(request):
     # This is a simplified example. You would need a way to signal the loop to stop.
     return JsonResponse({'status': 'stopped'})
+
+def voice_assistant_view(request):
+    return render(request, 'chatapp/index.html')  # Fixed template
