@@ -15,36 +15,48 @@
     <div id="status">Status: Inactive</div>
     <div id="transcript"></div>
 
-    <script>
-        const startButton = document.getElementById('startButton');
-        const stopButton = document.getElementById('stopButton');
-        const statusDiv = document.getElementById('status');
-        const transcriptDiv = document.getElementById('transcript');
+<script>
+    const startButton = document.getElementById('startButton');
+    const stopButton = document.getElementById('stopButton');
+    const statusDiv = document.getElementById('status');
+    const transcriptDiv = document.getElementById('transcript');
 
-        startButton.addEventListener('click', () => {
-            fetch('/chatapp/start/')
-                .then(response => response.json())
-                .then(data => {
-                    statusDiv.textContent = 'Status: Active';
-                    console.log(data);
-                });
-        });
+    startButton.addEventListener('click', () => {
+    fetch('/chatapp/start/')
+        .then(r => r.json())
+        .then(() => { statusDiv.textContent = 'Status: Active'; });
+    });
 
-        stopButton.addEventListener('click', () => {
-            fetch('/chatapp/stop/')
-                .then(response => response.json())
-                .then(data => {
-                    statusDiv.textContent = 'Status: Inactive';
-                    console.log(data);
-                });
-        });
+    stopButton.addEventListener('click', () => {
+    fetch('/chatapp/stop/')
+        .then(r => r.json())
+        .then(() => { statusDiv.textContent = 'Status: Inactive'; });
+    });
 
-        // WebSocket for real-time updates (this part is more complex and requires a backend implementation)
-        // const socket = new WebSocket('ws://' + window.location.host + '/ws/chat/');
-        // socket.onmessage = function(e) {
-        //     const data = JSON.parse(e.data);
-        //     transcriptDiv.innerHTML += '<div>' + data.message + '</div>';
-        // };
-    </script>
+    // --- WebSocket hookup ---
+    function connectWS() {
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const socket = new WebSocket(`${proto}://${window.location.host}/ws/voice/`);
+
+    socket.onopen = () => console.log('WS connected');
+    socket.onclose = () => {
+        console.log('WS closed; retrying in 1s');
+        setTimeout(connectWS, 1000); // simple auto-reconnect
+    };
+    socket.onerror = (e) => console.log('WS error', e);
+
+    socket.onmessage = (e) => {
+        const data = JSON.parse(e.data); // {role, text}
+        const who = data.role === 'user' ? 'You' : 'Gemini';
+        const row = document.createElement('div');
+        row.innerHTML = `<strong>${who}:</strong> ${data.text}`;
+        transcriptDiv.appendChild(row);
+        transcriptDiv.scrollTop = transcriptDiv.scrollHeight;
+    };
+    }
+
+    connectWS();
+</script>
+
 </body>
 </html>

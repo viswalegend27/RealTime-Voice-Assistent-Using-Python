@@ -10,6 +10,8 @@ from asgiref.sync import sync_to_async
 from voiceapp.models import Conversation, Message
 from google import genai
 from .prompts import AGENT_PROMPT
+from channels.layers import get_channel_layer
+
 
 # Silence the verbose logs
 for logger in ["google.genai", "genai"]:
@@ -84,6 +86,7 @@ class AudioLoop:
         self.last_gemini_time = 0
         self.timeout = 1.5
         self.conversation_id = None
+        self.channel_layer = get_channel_layer()
         
         # Database injections.
         self.db_ops = {
@@ -238,8 +241,24 @@ class AudioLoop:
                 if buffer and now - last_time > self.timeout:
                     if len(buffer) > 3 and (now - last_time > self.timeout or 
                                         buffer.endswith((".", "?", "!"))):
-                        self.stdout.write(f"{emoji} {label}: {normalize_transcript(buffer)}\n")
-                        await self.db_ops['save_message'](self.conversation_id, role, buffer)
+                        norm = normalize_transcript(buffer)
+                        self.stdout.write(f"{emoji} {label}: {norm}\n")
+                        await self.db_ops['save_message'](self.conversation_id, role, norm)
+
+                        # NEW: broadcast to WebSocket clients
+                        try:
+                            if self.channel_layer:
+                                await self.channel_layer.group_send(
+                                    "voice_transcripts",
+                                    {
+                                        "type": "transcript.message",
+                                        "role": role,          # "user" or "assistant"
+                                        "text": norm
+                                    }
+                                )
+                        except Exception as e:
+                            self.stdout.write(f"📡 Broadcast error: {e}\n")
+
                         setattr(self, buffer_attr, "")
     
     async def run(self):
