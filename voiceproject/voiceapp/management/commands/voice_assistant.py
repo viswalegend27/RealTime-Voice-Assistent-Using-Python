@@ -64,9 +64,10 @@ def normalize_transcript(text: str | None) -> str | None:
 class AudioLoop:
     """Minimal, robust audio <-> Gemini live loop with transcript persistence."""
 
-    def __init__(self, pya_instance: pyaudio.PyAudio, stdout):
+    def __init__(self, pya_instance: pyaudio.PyAudio, stdout, browser_mode: bool = False, group_name: str = "voice_transcripts"):
         self.pya = pya_instance
         self.stdout = stdout
+        self.browser_mode = browser_mode
 
         self.to_send: asyncio.Queue = asyncio.Queue(maxsize=10)
         self.received: asyncio.Queue = asyncio.Queue()
@@ -83,7 +84,7 @@ class AudioLoop:
 
         # channels broadcasting
         self.channel_layer = get_channel_layer()
-        self.group_name = "voice_transcripts"
+        self.group_name = group_name or "voice_transcripts"
 
     async def _broadcast(self, event: dict):
         if not self.channel_layer:
@@ -103,6 +104,8 @@ class AudioLoop:
     # --- Mic capture ---
 
     async def listen_audio(self):
+        if self.browser_mode:
+            return  # mic comes from browser via push_client_audio
         mic_info = self.pya.get_default_input_device_info()
         self.audio_in = await asyncio.to_thread(
             self.pya.open,
@@ -173,7 +176,10 @@ class AudioLoop:
                             if not self.bot_speaking:
                                 self.bot_speaking = True
                                 await self._broadcast_status("assistant", True)
-                            await self.received.put(audio)
+                            if self.browser_mode:
+                                await self._emit_audio_to_clients(audio)
+                            else:
+                                await self.received.put(audio)
 
                     # No transcript handling
 
@@ -188,6 +194,8 @@ class AudioLoop:
     # --- Playback ---
 
     async def play_audio(self):
+        if self.browser_mode:
+            return  # playback happens in browser
         stream = None
         try:
             while not self._stop.is_set():
@@ -221,9 +229,36 @@ class AudioLoop:
         # Periodically mark end of speaking if no audio being produced
         while not self._stop.is_set():
             await asyncio.sleep(0.6)
-            if self.bot_speaking and self.received.empty():
+            if self.bot_speaking and ((self.browser_mode) or self.received.empty()):
                 self.bot_speaking = False
                 await self._broadcast_status("assistant", False)
+
+    # --- Browser streaming helpers ---
+    async def push_client_audio(self, pcm_bytes: bytes, mime_type: str = f"audio/pcm;rate={SEND_RATE}"):
+        # Called by consumer when receiving audio from browser
+        if not pcm_bytes:
+            return
+        if not self.user_speaking:
+            self.user_speaking = True
+            await self._broadcast_status("user", True)
+        await self.to_send.put({"data": pcm_bytes, "mime_type": mime_type})
+
+    async def _emit_audio_to_clients(self, pcm_bytes: bytes):
+        # Aggregate into ~100ms chunks to avoid choppy playback
+        if not hasattr(self, "_out_buf"):
+            self._out_buf = bytearray()
+            self._last_emit = time.time()
+        self._out_buf += pcm_bytes
+        should_emit = len(self._out_buf) >= 4800 or (time.time() - self._last_emit) > 0.2
+        if should_emit:
+            b64 = base64.b64encode(self._out_buf).decode("ascii")
+            await self._broadcast({
+                "type": "audio.message",
+                "mime": f"audio/pcm;rate={RECV_RATE}",
+                "data": b64,
+            })
+            self._out_buf = bytearray()
+            self._last_emit = time.time()
 
     # --- Orchestration ---
 

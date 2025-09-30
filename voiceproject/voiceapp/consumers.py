@@ -4,17 +4,19 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 import asyncio
 import pyaudio
 from .management.commands.voice_assistant import AudioLoop
+import uuid
 
 class TranscriptConsumer(AsyncWebsocketConsumer):
     async def connect(self):
-        self.group_name = "voice_transcripts"
+        # per-connection group with safe name
+        self.group_name = f"voice_{uuid.uuid4().hex}"
         await self.channel_layer.group_add(self.group_name, self.channel_name)
         await self.accept()
         # Start background audio session if not already running for this connection
         self._loop_task = None
         try:
             self._pya = pyaudio.PyAudio()
-            self._audio = AudioLoop(self._pya, stdout=None)
+            self._audio = AudioLoop(self._pya, stdout=None, browser_mode=True, group_name=self.group_name)
             self._loop_task = asyncio.create_task(self._audio.run())
         except Exception:
             pass
@@ -34,6 +36,24 @@ class TranscriptConsumer(AsyncWebsocketConsumer):
         except Exception:
             pass
 
+    async def receive(self, text_data=None, bytes_data=None):
+        # Expect base64 audio frames from browser as JSON {type:"audio", data:"base64", mime:"audio/pcm;rate=16000"}
+        if not text_data:
+            return
+        try:
+            data = json.loads(text_data)
+        except Exception:
+            return
+        if data.get("type") == "audio" and "data" in data:
+            try:
+                import base64
+                pcm = base64.b64decode(data["data"])
+                mime = data.get("mime") or f"audio/pcm;rate=16000"
+                if getattr(self, "_audio", None):
+                    await self._audio.push_client_audio(pcm, mime)
+            except Exception:
+                pass
+
     async def transcript_message(self, event):
         # event = {"type": "transcript.message", "role": "user|assistant", "text": "..."}
         await self.send(text_data=json.dumps({
@@ -47,4 +67,12 @@ class TranscriptConsumer(AsyncWebsocketConsumer):
             "type": "status",
             "role": event["role"],
             "speaking": event["speaking"],
+        }))
+
+    async def audio_message(self, event):
+        # event = {"type":"audio.message", "mime": str, "data": base64}
+        await self.send(text_data=json.dumps({
+            "type": "audio",
+            "mime": event.get("mime"),
+            "data": event.get("data"),
         }))
