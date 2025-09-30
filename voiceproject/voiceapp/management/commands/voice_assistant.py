@@ -6,6 +6,8 @@ import base64
 import pyaudio
 
 from django.conf import settings
+from channels.layers import get_channel_layer
+from asgiref.sync import async_to_sync
 from django.core.management.base import BaseCommand
 
 from voiceapp.db_helpers import getlatest, gethistory, getsave_message
@@ -24,7 +26,7 @@ MODEL = "models/gemini-2.0-flash-exp"
 
 client = genai.Client(
     api_key=getattr(settings, "GEMINI_API_KEY", None),
-    http_options={"api_version": "v1alpha"},
+    http_options={"api_version": "v1beta"},
 )
 
 def normalize_transcript(text: str | None) -> str | None:
@@ -79,6 +81,25 @@ class AudioLoop:
         self.flush_delay = 0.5
 
         self.conversation_id: str | None = None
+
+        # channels broadcasting
+        self.channel_layer = get_channel_layer()
+        self.group_name = "voice_transcripts"
+
+    async def _broadcast(self, event: dict):
+        if not self.channel_layer:
+            return
+        try:
+            await self.channel_layer.group_send(self.group_name, event)
+        except Exception:
+            pass
+
+    async def _broadcast_status(self, role: str, speaking: bool):
+        await self._broadcast({
+            "type": "status.message",
+            "role": role,
+            "speaking": speaking,
+        })
 
     # --- Mic capture ---
 
@@ -171,9 +192,12 @@ class AudioLoop:
         if is_user:
             self.user_buf += (" " + nrm)
             self.user_t = time.time()
+            # speaking started/continuing
+            asyncio.create_task(self._broadcast_status("user", True))
         else:
             self.bot_buf += (" " + nrm)
             self.bot_t = time.time()
+            asyncio.create_task(self._broadcast_status("assistant", True))
 
     # --- Playback ---
 
@@ -226,10 +250,20 @@ class AudioLoop:
                 # Persist using the external helpers
                 await getsave_message(self.conversation_id, role, norm)
 
+                # Broadcast transcript to clients
+                await self._broadcast({
+                    "type": "transcript.message",
+                    "role": role,
+                    "text": norm,
+                })
+
                 if is_user:
                     self.user_buf = ""
                 else:
                     self.bot_buf = ""
+
+                # speaking ended for this turn
+                await self._broadcast_status(role, False)
 
     # --- Orchestration ---
 

@@ -10,44 +10,38 @@
 </head>
 <body>
     <h1>Voice Assistant</h1>
-    <button id="startButton">Start Assistant</button>
-    <button id="stopButton">Stop Assistant</button>
-    <div id="status">Status: Inactive</div>
+    <div id="whoSpeaking" style="margin-bottom:8px;color:#333;">Ready.</div>
+    <div id="status" style="margin-bottom:8px;color:#666;">Status: Connecting…</div>
     <div id="transcript"></div>
 
 <script>
-    const startButton = document.getElementById('startButton');
-    const stopButton = document.getElementById('stopButton');
     const statusDiv = document.getElementById('status');
+    const whoDiv = document.getElementById('whoSpeaking');
     const transcriptDiv = document.getElementById('transcript');
-
-    startButton.addEventListener('click', () => {
-    fetch('/chatapp/start/')
-        .then(r => r.json())
-        .then(() => { statusDiv.textContent = 'Status: Active'; });
-    });
-
-    stopButton.addEventListener('click', () => {
-    fetch('/chatapp/stop/')
-        .then(r => r.json())
-        .then(() => { statusDiv.textContent = 'Status: Inactive'; });
-    });
 
     // --- WebSocket hookup ---
     function connectWS() {
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const socket = new WebSocket(`${proto}://${window.location.host}/ws/voice/`);
 
-    socket.onopen = () => console.log('WS connected');
+    socket.onopen = () => { statusDiv.textContent = 'Status: Connected'; };
     socket.onclose = () => {
-        console.log('WS closed; retrying in 1s');
+        statusDiv.textContent = 'Status: Disconnected — retrying…';
         setTimeout(connectWS, 1000); // simple auto-reconnect
     };
     socket.onerror = (e) => console.log('WS error', e);
 
     socket.onmessage = (e) => {
-        const data = JSON.parse(e.data); // {role, text}
-        const who = data.role === 'user' ? 'You' : 'Gemini';
+        const data = JSON.parse(e.data);
+        if (data.type === 'status') {
+            if (data.speaking) {
+                whoDiv.textContent = (data.role === 'user') ? 'You are speaking…' : 'Agent is speaking…';
+            } else {
+                whoDiv.textContent = 'Ready.';
+            }
+            return;
+        }
+        const who = data.role === 'user' ? 'You' : 'Agent';
         const row = document.createElement('div');
         row.innerHTML = `<strong>${who}:</strong> ${data.text}`;
         transcriptDiv.appendChild(row);
