@@ -1,219 +1,196 @@
 import asyncio
 import logging
-import pyaudio
-import base64
 import time
 import re
+import base64
+import pyaudio
+
 from django.conf import settings
 from django.core.management.base import BaseCommand
-from asgiref.sync import sync_to_async
-from voiceapp.models import Conversation, Message
+
+from voiceapp.db_helpers import getlatest, gethistory, getsave_message
 from google import genai
+
 from .prompts import AGENT_PROMPT
-from channels.layers import get_channel_layer
 
 
-# Silence the verbose logs
-for logger in ["google.genai", "genai"]:
-    logging.getLogger(logger).setLevel(logging.WARNING)
+for name in ("google.genai", "genai"):
+    logging.getLogger(name).setLevel(logging.WARNING)
 
-# Audio configuration or the standards in the audio is recieved
+
 FORMAT, CHANNELS, CHUNK = pyaudio.paInt16, 1, 1024
 SEND_RATE, RECV_RATE = 16000, 24000
 MODEL = "models/gemini-2.0-flash-exp"
 
-# Setting up the google client
 client = genai.Client(
     api_key=getattr(settings, "GEMINI_API_KEY", None),
-    http_options={"api_version": "v1alpha"}
+    http_options={"api_version": "v1alpha"},
 )
 
-# Function to normalize the transcript
-def normalize_transcript(text):
+def normalize_transcript(text: str | None) -> str | None:
+    """Normalize spacing, merge letter-by-letter tokens, and tidy punctuation."""
     if not text:
         return text
-    
-    # Cleanup the empty spaces
-    text = re.sub(r'\s+', ' ', text).strip()
-    
-    # Join single letters into words
-    tokens = text.split()
-    result = []
-    i = 0
-    # This code segment processes a list called tokens and merges consecutive single-letter tokens into full words, while leaving other tokens unchanged.
+    text = re.sub(r"\s+", " ", text).strip()
+    tokens, out, i = text.split(), [], 0
+
     while i < len(tokens):
-        if len(tokens[i]) == 1 and tokens[i].isalpha():
-            letters = [tokens[i]]
+        t = tokens[i]
+        if len(t) == 1 and t.isalpha():
+            letters = [t]
             i += 1
             while i < len(tokens) and len(tokens[i]) == 1 and tokens[i].isalpha():
                 letters.append(tokens[i])
                 i += 1
-            result.append(''.join(letters) if len(letters) >= 2 else letters[0])
+            out.append("".join(letters) if len(letters) > 1 else letters[0])
         else:
-            result.append(tokens[i])
+            out.append(t)
             i += 1
-    
-    # Fix punctuation spacing
-    text = ' '.join(result)
-    for pattern, replacement in [
-        (r'\s+([,?.!;:])', r'\1'),
+
+    text = " ".join(out)
+    for pat, rep in (
+        (r"\s+([,?.!;:])", r"\1"),
         (r"\s+'", "'"),
         (r"'\s+", "'"),
         (r'\s+"', '"'),
         (r'"\s+', '"'),
-        (r'\s{2,}', ' ')
-    ]:
-        text = re.sub(pattern, replacement, text)
-    
+        (r"\s{2,}", " "),
+    ):
+        text = re.sub(pat, rep, text)
     return text.strip()
 
 class AudioLoop:
-    def __init__(self, pya_instance, stdout):
-        # Declaring pyAudio instance
+    """Minimal, robust audio <-> Gemini live loop with transcript persistence."""
+
+    def __init__(self, pya_instance: pyaudio.PyAudio, stdout):
         self.pya = pya_instance
-        # Creating output variable
         self.stdout = stdout
-        # Queue for sending
-        self.to_send = asyncio.Queue(maxsize=10)
-        # Queue for recieving
-        self.received = asyncio.Queue()
-        self.audio_stream = None
-        self.session = None
+
+        self.to_send: asyncio.Queue = asyncio.Queue(maxsize=10)
+        self.received: asyncio.Queue = asyncio.Queue()
+
+        self.audio_in = None
         self._stop = asyncio.Event()
-        self.user_buffer = ""
-        self.gemini_buffer = ""
-        self.last_user_time = 0
-        self.last_gemini_time = 0
-        self.timeout = 1.5
-        self.conversation_id = None
-        self.channel_layer = get_channel_layer()
-        
-        # Database injections.
-        self.db_ops = {
-            'create_conversation': sync_to_async(lambda: str(Conversation.objects.create().id)),
-            'save_message': sync_to_async(self._save_message),
-            'get_history': sync_to_async(self._get_history),
-            'get_latest': sync_to_async(
-                lambda: str(Conversation.objects.order_by('-created_at').first().id 
-                        if Conversation.objects.exists() 
-                        else Conversation.objects.create().id)
-            )
-        }
-    
-    # Function helps to save messages into our ID
-    def _save_message(self, conversation_id, role, content):
-        if content and content.strip():
-            try:
-                Message.objects.create(
-                    conversation=Conversation.objects.get(id=conversation_id),
-                    role='user' if role == 'user' else 'assistant',
-                    content=content.strip()
-                )
-            except Exception as e:
-                self.stdout.write(f"⚠️ DB Save Error: {e}\n")
-    
-    def _get_history(self, conversation_id):
-        try:
-            messages = Message.objects.filter(
-                conversation_id=conversation_id
-            ).order_by('-timestamp')[:6] # Gets the last sex messages
-            
-            history = [f"{'User' if m.role == 'user' else 'Assistant'}: {m.content}" 
-                    for m in reversed(messages)]
-            
-            return f"Previous conversation:\n{chr(10).join(history)}" if history else "No prior conversation."
-        except Exception:
-            return "No prior conversation."
-    
+        self.session = None
+
+        # transcript buffers + timers
+        self.user_buf, self.bot_buf = "", ""
+        self.user_t, self.bot_t = 0.0, 0.0
+        self.flush_delay = 0.5
+
+        self.conversation_id: str | None = None
+
+    # --- Mic capture ---
+
     async def listen_audio(self):
         mic_info = self.pya.get_default_input_device_info()
-        self.audio_stream = await asyncio.to_thread(
+        self.audio_in = await asyncio.to_thread(
             self.pya.open,
-            format=FORMAT, channels=CHANNELS, rate=SEND_RATE,
-            input=True, input_device_index=mic_info.get("index"),
-            frames_per_buffer=CHUNK
+            format=FORMAT,
+            channels=CHANNELS,
+            rate=SEND_RATE,
+            input=True,
+            input_device_index=mic_info.get("index"),
+            frames_per_buffer=CHUNK,
         )
-        
         self.stdout.write("🎙️ Microphone ready. Listening...\n")
-        
+
+        try:
+            while not self._stop.is_set():
+                try:
+                    data = await asyncio.to_thread(
+                        self.audio_in.read, CHUNK, exception_on_overflow=False
+                    )
+                    if data:
+                        await self.to_send.put(
+                            {"data": data, "mime_type": f"audio/pcm;rate={SEND_RATE}"}
+                        )
+                except Exception as e:
+                    self.stdout.write(f"⚠️ Mic error: {e}\n")
+                    await asyncio.sleep(0.1)
+        finally:
+            if self.audio_in:
+                self.audio_in.close()
+
+    # --- Gemini send/receive ---
+
+    async def _gemini_sender(self):
         while not self._stop.is_set():
             try:
-                data = await asyncio.to_thread(
-                    self.audio_stream.read, CHUNK, exception_on_overflow=False
-                )
-                if data:
-                    await self.to_send.put({
-                        "data": data, 
-                        # Multipurpose internet media extensions or A media type format
-                        "mime_type": f"audio/pcm;rate={SEND_RATE}"
-                    })
+                item = await self.to_send.get()
+                await self.session.send(input=item)
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
-                self.stdout.write(f"⚠️ Mic error: {e}\n")
+                self.stdout.write(f"📤 Send error: {e}\n")
                 await asyncio.sleep(0.1)
-    
-    async def process_gemini(self):
-        """Handle all Gemini interactions"""
-        # Send audio
-        async def send():
-            while not self._stop.is_set():
-                try:
-                    # Asynchornous operation to capture our information and send to gemini
-                    await self.session.send(input=await self.to_send.get()) # data to be sent
-                except Exception as e:
-                    if not isinstance(e, asyncio.CancelledError):
-                        self.stdout.write(f"📤 Send error: {e}\n")
-                    await asyncio.sleep(0.1)
-        
-        # Receive and process responses
-        async def receive():
-            while not self._stop.is_set():
-                try:
-                    async for response in self.session.receive():
-                        sc = getattr(response, "server_content", None)
-                        if not sc:
-                            continue
-                        
-                        # Process audio
-                        if mt := getattr(sc, "model_turn", None):
-                            for part in getattr(mt, "parts", []):
-                                if blob := (getattr(part, "inline_data", None) or 
-                                        getattr(part, "inlineData", None)):
-                                    if data := getattr(blob, "data", None):
-                                        audio = data if isinstance(data, bytes) else base64.b64decode(data)
-                                        await self.received.put(audio)
-                        
-                        # Process transcriptions
-                        # Setting the transcriptions
-                        for attr, buffer_attr, time_attr in [
-                            ("input_transcription", "user_buffer", "last_user_time"),
-                            ("output_transcription", "gemini_buffer", "last_gemini_time")
-                        ]:
-                            if hasattr(sc, attr) and (txt := getattr(getattr(sc, attr), "text", "")):
-                                setattr(self, buffer_attr, 
-                                    getattr(self, buffer_attr) + " " + normalize_transcript(txt.strip()))
-                                setattr(self, time_attr, time.time())
-                        
-                    await asyncio.sleep(0.05)
-                except Exception as e:
-                    if not isinstance(e, asyncio.CancelledError):
-                        self.stdout.write(f"📥 Receive error: {e}\n")
-                    await asyncio.sleep(0.5)
-        
-        await asyncio.gather(send(), receive(), return_exceptions=True)
-    
+
+    async def _gemini_receiver(self):
+        while not self._stop.is_set():
+            try:
+                async for resp in self.session.receive():
+                    sc = getattr(resp, "server_content", None)
+                    if not sc:
+                        continue
+
+                    # Audio chunks
+                    mt = getattr(sc, "model_turn", None)
+                    if mt:
+                        for part in getattr(mt, "parts", []):
+                            blob = getattr(part, "inline_data", None) or getattr(
+                                part, "inlineData", None
+                            )
+                            if not blob:
+                                continue
+                            data = getattr(blob, "data", None)
+                            if not data:
+                                continue
+                            audio = data if isinstance(data, bytes) else base64.b64decode(data)
+                            await self.received.put(audio)
+
+                    # Transcripts
+                    self._maybe_buffer_transcript(sc, attr="input_transcription", is_user=True)
+                    self._maybe_buffer_transcript(sc, attr="output_transcription", is_user=False)
+
+                await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self.stdout.write(f"📥 Receive error: {e}\n")
+                await asyncio.sleep(0.3)
+
+    def _maybe_buffer_transcript(self, sc, attr: str, is_user: bool):
+        if not hasattr(sc, attr):
+            return
+        txt = getattr(getattr(sc, attr), "text", "") or ""
+        if not txt:
+            return
+        nrm = normalize_transcript(txt.strip())
+        if not nrm:
+            return
+        if is_user:
+            self.user_buf += (" " + nrm)
+            self.user_t = time.time()
+        else:
+            self.bot_buf += (" " + nrm)
+            self.bot_t = time.time()
+
+    # --- Playback ---
+
     async def play_audio(self):
-        """Play received audio"""
         stream = None
         try:
             while not self._stop.is_set():
                 if not stream:
                     stream = await asyncio.to_thread(
                         self.pya.open,
-                        format=FORMAT, channels=CHANNELS, 
-                        rate=RECV_RATE, output=True
+                        format=FORMAT,
+                        channels=CHANNELS,
+                        rate=RECV_RATE,
+                        output=True,
                     )
                     self.stdout.write("🔊 Playback active.\n")
-                
+
                 chunk = await self.received.get()
                 if isinstance(chunk, bytes) and chunk:
                     await asyncio.to_thread(stream.write, chunk)
@@ -224,96 +201,89 @@ class AudioLoop:
         finally:
             if stream:
                 stream.close()
-    
+
+    # --- Periodic transcript flush ---
+
     async def flush_transcripts(self):
-        """Print and save transcripts when ready"""
         while not self._stop.is_set():
-            await asyncio.sleep(self.timeout)
+            await asyncio.sleep(self.flush_delay)
             now = time.time()
-            
-            for buffer_attr, time_attr, role, emoji, label in [
-                ("user_buffer", "last_user_time", "user", "🧑", "You"),
-                ("gemini_buffer", "last_gemini_time", "assistant", "🤖", "Gemini")
-            ]:
-                buffer = getattr(self, buffer_attr).strip()
-                last_time = getattr(self, time_attr)
-                
-                if buffer and now - last_time > self.timeout:
-                    if len(buffer) > 3 and (now - last_time > self.timeout or 
-                                        buffer.endswith((".", "?", "!"))):
-                        norm = normalize_transcript(buffer)
-                        self.stdout.write(f"{emoji} {label}: {norm}\n")
-                        await self.db_ops['save_message'](self.conversation_id, role, norm)
 
-                        # NEW: broadcast to WebSocket clients
-                        try:
-                            if self.channel_layer:
-                                await self.channel_layer.group_send(
-                                    "voice_transcripts",
-                                    {
-                                        "type": "transcript.message",
-                                        "role": role,          # "user" or "assistant"
-                                        "text": norm
-                                    }
-                                )
-                        except Exception as e:
-                            self.stdout.write(f"📡 Broadcast error: {e}\n")
+            for is_user in (True, False):
+                buf = (self.user_buf if is_user else self.bot_buf).strip()
+                last = self.user_t if is_user else self.bot_t
+                if not buf or now - last <= self.flush_delay:
+                    continue
+                if len(buf) <= 3 and not buf.endswith((".", "?", "!")):
+                    continue
 
-                        setattr(self, buffer_attr, "")
-    
+                norm = normalize_transcript(buf)
+                if not norm:
+                    continue
+
+                emoji, label, role = ("🧑", "You", "user") if is_user else ("🤖", "Gemini", "assistant")
+                self.stdout.write(f"{emoji} {label}: {norm}\n")
+                # Persist using the external helpers
+                await getsave_message(self.conversation_id, role, norm)
+
+                if is_user:
+                    self.user_buf = ""
+                else:
+                    self.bot_buf = ""
+
+    # --- Orchestration ---
+
     async def run(self):
-        """Main execution loop"""
         try:
-            # Setup conversation
-            self.conversation_id = await self.db_ops['get_latest']()
+            # Conversation setup via helpers
+            self.conversation_id = await getlatest()
             self.stdout.write(f"📝 Session ID: {self.conversation_id}\n")
-            
-            # Get history and create config
-            history = await self.db_ops['get_history'](self.conversation_id)
+
+            history = await gethistory(self.conversation_id)
             config = {
                 "generation_config": {"response_modalities": ["AUDIO"]},
-                "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": "Puck"}}},
+                "speech_config": {
+                    "voice_config": {"prebuilt_voice_config": {"voice_name": "Puck"}}
+                },
                 "input_audio_transcription": {},
                 "output_audio_transcription": {},
                 "system_instruction": {
-                    "parts": [{"text": f"{AGENT_PROMPT.strip()}\n\n{history}\n\nNow continue the conversation naturally."}]
-                }
+                    "parts": [
+                        {
+                            "text": f"{AGENT_PROMPT.strip()}\n\n{history}\n\nNow continue the conversation naturally."
+                        }
+                    ]
+                },
             }
-            
-            # Start session
+
             async with client.aio.live.connect(model=MODEL, config=config) as session:
                 self.session = session
                 self.stdout.write("💬 Voice chat started — press Ctrl+C to stop.\n")
-                
-                # Run all tasks
-                tasks = await asyncio.gather(
+
+                tasks = [
                     asyncio.create_task(self.listen_audio()),
-                    asyncio.create_task(self.process_gemini()),
+                    asyncio.create_task(self._gemini_sender()),
+                    asyncio.create_task(self._gemini_receiver()),
                     asyncio.create_task(self.play_audio()),
                     asyncio.create_task(self.flush_transcripts()),
-                    return_exceptions=True
-                )
-                
+                ]
+
                 await self._stop.wait()
-                
-                for task in tasks:
-                    if hasattr(task, 'cancel'):
-                        task.cancel()
-                
+                for t in tasks:
+                    t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
         except Exception as e:
             self.stdout.write(f"💥 Run error: {e}\n")
         finally:
-            if self.audio_stream:
-                self.audio_stream.close()
             self.stdout.write("👋 Session ended.\n")
-    
+
     async def stop(self):
-        """Stop the audio loop"""
         self._stop.set()
 
 class Command(BaseCommand):
     help = "Starts a real-time voice chat with Gemini AI."
-    
+
     def handle(self, *args, **options):
         pya = pyaudio.PyAudio()
         try:
