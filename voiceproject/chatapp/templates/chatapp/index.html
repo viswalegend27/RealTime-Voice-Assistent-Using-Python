@@ -12,12 +12,11 @@
     <h1>Voice Assistant</h1>
     <div id="whoSpeaking" style="margin-bottom:8px;color:#333;">Ready.</div>
     <div id="status" style="margin-bottom:8px;color:#666;">Status: Connecting…</div>
-    <div id="transcript"></div>
 
 <script>
     const statusDiv = document.getElementById('status');
     const whoDiv = document.getElementById('whoSpeaking');
-    const transcriptDiv = document.getElementById('transcript');
+    // no transcript
 
     // --- WebSocket hookup ---
     function connectWS() {
@@ -41,11 +40,7 @@
             }
             return;
         }
-        const who = data.role === 'user' ? 'You' : 'Agent';
-        const row = document.createElement('div');
-        row.innerHTML = `<strong>${who}:</strong> ${data.text}`;
-        transcriptDiv.appendChild(row);
-        transcriptDiv.scrollTop = transcriptDiv.scrollHeight;
+        // ignore any transcript messages
     };
     }
 

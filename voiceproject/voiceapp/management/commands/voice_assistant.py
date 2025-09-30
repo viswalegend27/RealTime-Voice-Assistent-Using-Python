@@ -75,10 +75,9 @@ class AudioLoop:
         self._stop = asyncio.Event()
         self.session = None
 
-        # transcript buffers + timers
-        self.user_buf, self.bot_buf = "", ""
-        self.user_t, self.bot_t = 0.0, 0.0
-        self.flush_delay = 0.5
+        # speaking status debounce
+        self.user_speaking = False
+        self.bot_speaking = False
 
         self.conversation_id: str | None = None
 
@@ -114,7 +113,8 @@ class AudioLoop:
             input_device_index=mic_info.get("index"),
             frames_per_buffer=CHUNK,
         )
-        self.stdout.write("🎙️ Microphone ready. Listening...\n")
+        if self.stdout:
+                self.stdout.write("🎙️ Microphone ready. Listening...\n")
 
         try:
             while not self._stop.is_set():
@@ -127,7 +127,8 @@ class AudioLoop:
                             {"data": data, "mime_type": f"audio/pcm;rate={SEND_RATE}"}
                         )
                 except Exception as e:
-                    self.stdout.write(f"⚠️ Mic error: {e}\n")
+                    if self.stdout:
+                        self.stdout.write(f"⚠️ Mic error: {e}\n")
                     await asyncio.sleep(0.1)
         finally:
             if self.audio_in:
@@ -143,7 +144,8 @@ class AudioLoop:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                self.stdout.write(f"📤 Send error: {e}\n")
+                if self.stdout:
+                    self.stdout.write(f"📤 Send error: {e}\n")
                 await asyncio.sleep(0.1)
 
     async def _gemini_receiver(self):
@@ -167,37 +169,21 @@ class AudioLoop:
                             if not data:
                                 continue
                             audio = data if isinstance(data, bytes) else base64.b64decode(data)
+                            # mark assistant speaking on first chunk
+                            if not self.bot_speaking:
+                                self.bot_speaking = True
+                                await self._broadcast_status("assistant", True)
                             await self.received.put(audio)
 
-                    # Transcripts
-                    self._maybe_buffer_transcript(sc, attr="input_transcription", is_user=True)
-                    self._maybe_buffer_transcript(sc, attr="output_transcription", is_user=False)
+                    # No transcript handling
 
                 await asyncio.sleep(0.05)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                self.stdout.write(f"📥 Receive error: {e}\n")
+                if self.stdout:
+                    self.stdout.write(f"📥 Receive error: {e}\n")
                 await asyncio.sleep(0.3)
-
-    def _maybe_buffer_transcript(self, sc, attr: str, is_user: bool):
-        if not hasattr(sc, attr):
-            return
-        txt = getattr(getattr(sc, attr), "text", "") or ""
-        if not txt:
-            return
-        nrm = normalize_transcript(txt.strip())
-        if not nrm:
-            return
-        if is_user:
-            self.user_buf += (" " + nrm)
-            self.user_t = time.time()
-            # speaking started/continuing
-            asyncio.create_task(self._broadcast_status("user", True))
-        else:
-            self.bot_buf += (" " + nrm)
-            self.bot_t = time.time()
-            asyncio.create_task(self._broadcast_status("assistant", True))
 
     # --- Playback ---
 
@@ -213,57 +199,31 @@ class AudioLoop:
                         rate=RECV_RATE,
                         output=True,
                     )
-                    self.stdout.write("🔊 Playback active.\n")
+                    if self.stdout:
+                        self.stdout.write("🔊 Playback active.\n")
 
                 chunk = await self.received.get()
                 if isinstance(chunk, bytes) and chunk:
                     await asyncio.to_thread(stream.write, chunk)
+                    # heuristic: assistant finished after short pause; mark not speaking in flush task below
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            self.stdout.write(f"🔈 Playback error: {e}\n")
+            if self.stdout:
+                self.stdout.write(f"🔈 Playback error: {e}\n")
         finally:
             if stream:
                 stream.close()
 
     # --- Periodic transcript flush ---
 
-    async def flush_transcripts(self):
+    async def _status_heartbeat(self):
+        # Periodically mark end of speaking if no audio being produced
         while not self._stop.is_set():
-            await asyncio.sleep(self.flush_delay)
-            now = time.time()
-
-            for is_user in (True, False):
-                buf = (self.user_buf if is_user else self.bot_buf).strip()
-                last = self.user_t if is_user else self.bot_t
-                if not buf or now - last <= self.flush_delay:
-                    continue
-                if len(buf) <= 3 and not buf.endswith((".", "?", "!")):
-                    continue
-
-                norm = normalize_transcript(buf)
-                if not norm:
-                    continue
-
-                emoji, label, role = ("🧑", "You", "user") if is_user else ("🤖", "Gemini", "assistant")
-                self.stdout.write(f"{emoji} {label}: {norm}\n")
-                # Persist using the external helpers
-                await getsave_message(self.conversation_id, role, norm)
-
-                # Broadcast transcript to clients
-                await self._broadcast({
-                    "type": "transcript.message",
-                    "role": role,
-                    "text": norm,
-                })
-
-                if is_user:
-                    self.user_buf = ""
-                else:
-                    self.bot_buf = ""
-
-                # speaking ended for this turn
-                await self._broadcast_status(role, False)
+            await asyncio.sleep(0.6)
+            if self.bot_speaking and self.received.empty():
+                self.bot_speaking = False
+                await self._broadcast_status("assistant", False)
 
     # --- Orchestration ---
 
@@ -271,7 +231,8 @@ class AudioLoop:
         try:
             # Conversation setup via helpers
             self.conversation_id = await getlatest()
-            self.stdout.write(f"📝 Session ID: {self.conversation_id}\n")
+            if self.stdout:
+                self.stdout.write(f"📝 Session ID: {self.conversation_id}\n")
 
             history = await gethistory(self.conversation_id)
             config = {
@@ -279,8 +240,7 @@ class AudioLoop:
                 "speech_config": {
                     "voice_config": {"prebuilt_voice_config": {"voice_name": "Puck"}}
                 },
-                "input_audio_transcription": {},
-                "output_audio_transcription": {},
+                # no transcription requested
                 "system_instruction": {
                     "parts": [
                         {
@@ -292,14 +252,15 @@ class AudioLoop:
 
             async with client.aio.live.connect(model=MODEL, config=config) as session:
                 self.session = session
-                self.stdout.write("💬 Voice chat started — press Ctrl+C to stop.\n")
+                if self.stdout:
+                    self.stdout.write("💬 Voice chat started — press Ctrl+C to stop.\n")
 
                 tasks = [
                     asyncio.create_task(self.listen_audio()),
                     asyncio.create_task(self._gemini_sender()),
                     asyncio.create_task(self._gemini_receiver()),
                     asyncio.create_task(self.play_audio()),
-                    asyncio.create_task(self.flush_transcripts()),
+                    asyncio.create_task(self._status_heartbeat()),
                 ]
 
                 await self._stop.wait()
@@ -308,9 +269,11 @@ class AudioLoop:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
         except Exception as e:
-            self.stdout.write(f"💥 Run error: {e}\n")
+            if self.stdout:
+                self.stdout.write(f"💥 Run error: {e}\n")
         finally:
-            self.stdout.write("👋 Session ended.\n")
+            if self.stdout:
+                self.stdout.write("👋 Session ended.\n")
 
     async def stop(self):
         self._stop.set()
