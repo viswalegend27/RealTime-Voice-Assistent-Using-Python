@@ -81,9 +81,23 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'chatapp',    # Add this line to your settings.py
+    'channels',  # Add this line to your settings.py
     'voice_assistant',  # Add this line to your settings.py
 ]
 
+# Create channels 
+ASGI_APPLICATION = "voiceproject.asgi.application"
+
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels.layers.InMemoryChannelLayer",
+    }
+}
+
+```
+
+```
 # Add your Gemini API key
 GEMINI_API_KEY = "your-api-key-here" 
 To your .env file
