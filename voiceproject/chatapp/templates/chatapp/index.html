@@ -1,130 +1,190 @@
+<!-- index.html -->
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Voice Assistant</title>
-    <style>
-        body { font-family: sans-serif; }
-        #status { margin-bottom: 1em; }
-        #transcript { border: 1px solid #ccc; padding: 1em; height: 300px; overflow-y: scroll; }
-    </style>
+  <title>Voice Assistant</title>
+  <style>
+    body { font-family: sans-serif; }
+    #status { margin-bottom: 1em; }
+    #transcript { border: 1px solid #ccc; padding: 1em; height: 300px; overflow-y: scroll; }
+    #transcript p { margin: 0.4em 0; }
+    .msg-text { white-space: pre-wrap; }
+  </style>
 </head>
 <body>
-    <h1>Voice Assistant</h1>
-    <button id="enableMic" style="margin:6px 0;">Enable microphone</button>
-    <div id="whoSpeaking" style="margin-bottom:8px;color:#333;">Ready.</div>
-    <div id="status" style="margin-bottom:8px;color:#666;">Status: Connecting…</div>
+  <h1>Voice Assistant</h1>
+  <button id="enableMic" style="margin:6px 0;">Enable microphone</button>
+  <div id="whoSpeaking" style="margin-bottom:8px;color:#333;">Ready.</div>
+  <div id="status" style="margin-bottom:8px;color:#666;">Status: Connecting…</div>
+  <div id="transcript"></div> <!-- Transcript area -->
 
 <script>
-    const statusDiv = document.getElementById('status');
-    const enableBtn = document.getElementById('enableMic');
-    const whoDiv = document.getElementById('whoSpeaking');
-    // no transcript
+const statusDiv = document.getElementById('status');
+const enableBtn = document.getElementById('enableMic');
+const whoDiv = document.getElementById('whoSpeaking');
+const transcriptDiv = document.getElementById('transcript');
 
-    // --- WebSocket hookup ---
-    function connectWS() {
-    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const socket = new WebSocket(`${proto}://${window.location.host}/ws/voice/`);
-    window.ws = socket;
+// ---------- Persistent transcript state ----------
+let activeRole = null;                                 // whose turn is active right now
+const lastMsgEl = { user: null, assistant: null };     // last <p> node for each role
+const buffers   = { user: '',  assistant: ''  };       // current text per role
 
-    socket.onopen = () => { statusDiv.textContent = 'Status: Connected'; enableBtn.disabled = false; };
-    socket.onclose = () => {
-        statusDiv.textContent = 'Status: Disconnected — retrying…';
-        stopMic();
-        setTimeout(connectWS, 1000); // simple auto-reconnect
-    };
-    socket.onerror = (e) => console.log('WS error', e);
+function startNewTurn(role) {
+  const speaker = role === 'user' ? 'You' : 'Assistant';
+  const p = document.createElement('p');
+  p.innerHTML = `<strong>${speaker}:</strong> <span class="msg-text"></span>`;
+  transcriptDiv.appendChild(p);
+  lastMsgEl[role] = p;
+  buffers[role] = '';
+  activeRole = role;
+}
 
-    socket.onmessage = (e) => {
-        const data = JSON.parse(e.data);
-        if (data.type === 'status') {
-            if (data.speaking) {
-                whoDiv.textContent = (data.role === 'user') ? 'You are speaking…' : 'Agent is speaking…';
-            } else {
-                whoDiv.textContent = 'Ready.';
-            }
-            return;
-        }
-        if (data.type === 'audio' && data.data) {
-            // play PCM 24k mono data from server
-            playPcmBase64(data.data, 24000);
-            return;
-        }
-    };
+function smartMerge(current, incoming) {
+  // 1) Cumulative update (incoming already contains current as prefix)
+  if (incoming.startsWith(current)) return incoming;
+
+  // 2) If incoming is shorter and is a prefix of current, keep the longer one
+  if (current.startsWith(incoming)) return current;
+
+  // 3) Otherwise, find the longest overlap between the end of current and start of incoming
+  const maxCheck = Math.min(80, current.length, incoming.length);
+  let k = 0;
+  for (let len = maxCheck; len > 0; len--) {
+    if (current.slice(-len) === incoming.slice(0, len)) { k = len; break; }
+  }
+  let tail = incoming.slice(k);
+
+  // 4) Only insert a space if both sides are ASCII word chars and no punctuation at the boundary
+  const needSpace =
+    k === 0 &&
+    /[A-Za-z0-9]$/.test(current) &&
+    /^[A-Za-z0-9]/.test(incoming) &&
+    !/^[,.!?;:)]/.test(incoming);
+
+  return current + (needSpace ? ' ' : '') + tail;
+}
+
+function upsertTranscript(role, incomingText) {
+  if (activeRole !== role || !lastMsgEl[role]) {
+    startNewTurn(role);
+  }
+  const merged = smartMerge(buffers[role] || '', String(incomingText || ''));
+  buffers[role] = merged;
+  lastMsgEl[role].querySelector('.msg-text').textContent = merged;
+  transcriptDiv.scrollTop = transcriptDiv.scrollHeight;
+}
+
+// ---------- WebSocket hookup ----------
+function connectWS() {
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  const socket = new WebSocket(`${proto}://${window.location.host}/ws/voice/`);
+  window.ws = socket;
+
+  socket.onopen = () => { statusDiv.textContent = 'Status: Connected'; enableBtn.disabled = false; };
+  socket.onclose = () => {
+    statusDiv.textContent = 'Status: Disconnected — retrying…';
+    stopMic();
+    setTimeout(connectWS, 1000);
+  };
+  socket.onerror = (e) => console.log('WS error', e);
+
+  socket.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+
+    // Speaking status: informative only; new turn starts when role changes via transcript
+    if (data.type === 'status') {
+      whoDiv.textContent = data.speaking
+        ? (data.role === 'user' ? 'You are speaking…' : 'Assistant is speaking…')
+        : 'Ready.';
+      return;
     }
 
-    connectWS();
-    enableBtn.disabled = true;
-
-    // --- Mic capture and send ---
-    let mediaStream; let audioCtx; let processor; let source;
-    async function startMic(socket){
-      try{
-        mediaStream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,sampleRate:16000}, video:false});
-        audioCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:16000});
-        source = audioCtx.createMediaStreamSource(mediaStream);
-        processor = audioCtx.createScriptProcessor(4096,1,1);
-        const encoder = new PCM16Encoder(16000);
-        processor.onaudioprocess = (ev)=>{
-          const input = ev.inputBuffer.getChannelData(0);
-          const chunk = encoder.encode(input);
-          if (chunk && socket.readyState===1){
-            const b64 = base64Encode(chunk);
-            socket.send(JSON.stringify({type:'audio', mime:'audio/pcm;rate=16000', data:b64}));
-          }
-        };
-        source.connect(processor); processor.connect(audioCtx.destination);
-      }catch(e){ console.log('Mic error', e); statusDiv.textContent = 'Mic error: ' + (e && e.message ? e.message : e); }
-    }
-    enableBtn.addEventListener('click', () => {
-      if (!window.ws || window.ws.readyState !== 1){ statusDiv.textContent = 'Status: Connecting… please wait'; return; }
-      startMic(window.ws);
-      enableBtn.disabled = true; enableBtn.textContent = 'Microphone enabled';
-    });
-
-    function stopMic(){
-      try{
-        if (processor){ processor.disconnect(); processor.onaudioprocess=null; processor=null; }
-        if (source){ source.disconnect(); source=null; }
-        if (audioCtx){ audioCtx.close(); audioCtx=null; }
-        if (mediaStream){ mediaStream.getTracks().forEach(t=>t.stop()); mediaStream=null; }
-        enableBtn.disabled = false; enableBtn.textContent = 'Enable microphone';
-      }catch(_){ }
+    // Audio playback
+    if (data.type === 'audio' && data.data) {
+      playPcmBase64(data.data, 24000);
+      return;
     }
 
-    // --- Utilities ---
-    class PCM16Encoder{
-      constructor(rate){ this.rate=rate; this._buf=[]; }
-      encode(float32){
-        const len=float32.length; const out=new Int16Array(len);
-        for(let i=0;i<len;i++){ let s=Math.max(-1, Math.min(1, float32[i])); out[i]=s<0?s*0x8000:s*0x7FFF; }
-        return new Uint8Array(out.buffer);
+    // Streaming transcript chunk (may be partial, suffix, or cumulative)
+    if (data.role && typeof data.text === 'string') {
+      upsertTranscript(data.role, data.text);
+      return;
+    }
+  };
+}
+
+connectWS();
+enableBtn.disabled = true;
+
+// ---------- Mic capture and send ----------
+let mediaStream; let audioCtx; let processor; let source;
+async function startMic(socket){
+  try{
+    mediaStream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,sampleRate:16000}, video:false});
+    audioCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:16000});
+    source = audioCtx.createMediaStreamSource(mediaStream);
+    processor = audioCtx.createScriptProcessor(4096,1,1);
+    const encoder = new PCM16Encoder(16000);
+    processor.onaudioprocess = (ev)=>{
+      const input = ev.inputBuffer.getChannelData(0);
+      const chunk = encoder.encode(input);
+      if (chunk && socket.readyState===1){
+        const b64 = base64Encode(chunk);
+        socket.send(JSON.stringify({type:'audio', mime:'audio/pcm;rate=16000', data:b64}));
       }
-    }
-    function base64Encode(uint8){
-      let str=""; const bytes = uint8; const len=bytes.length;
-      for (let i=0;i<len;i++) str+=String.fromCharCode(bytes[i]);
-      return btoa(str);
-    }
-    // Sequential playback queue to avoid overlap
-    let playbackCtx; let playTime=0;
-    function ensurePlaybackCtx(rate){
-      if (!playbackCtx || playbackCtx.sampleRate!==rate){ playbackCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:rate}); playTime = playbackCtx.currentTime; }
-      return playbackCtx;
-    }
-    function playPcmBase64(b64, sampleRate){
-      const bytes = Uint8Array.from(atob(b64), c=>c.charCodeAt(0));
-      const view = new DataView(bytes.buffer);
-      const len = bytes.byteLength/2; // 16-bit
-      const ctx = ensurePlaybackCtx(sampleRate);
-      const buffer = ctx.createBuffer(1, len, sampleRate);
-      const ch = buffer.getChannelData(0);
-      for(let i=0;i<len;i++){ ch[i] = view.getInt16(i*2, true) / 0x8000; }
-      const src = ctx.createBufferSource(); src.buffer=buffer; src.connect(ctx.destination);
-      const now = ctx.currentTime;
-      if (playTime < now) playTime = now;
-      src.start(playTime);
-      playTime += buffer.duration;
-    }
+    };
+    source.connect(processor); processor.connect(audioCtx.destination);
+  }catch(e){ console.log('Mic error', e); statusDiv.textContent = 'Mic error: ' + (e && e.message ? e.message : e); }
+}
+enableBtn.addEventListener('click', () => {
+  if (!window.ws || window.ws.readyState !== 1){ statusDiv.textContent = 'Status: Connecting… please wait'; return; }
+  startMic(window.ws);
+  enableBtn.disabled = true; enableBtn.textContent = 'Microphone enabled';
+});
+
+function stopMic(){
+  try{
+    if (processor){ processor.disconnect(); processor.onaudioprocess=null; processor=null; }
+    if (source){ source.disconnect(); source=null; }
+    if (audioCtx){ audioCtx.close(); audioCtx=null; }
+    if (mediaStream){ mediaStream.getTracks().forEach(t=>t.stop()); mediaStream=null; }
+    enableBtn.disabled = false; enableBtn.textContent = 'Enable microphone';
+  }catch(_){ }
+}
+
+// ---------- Utilities ----------
+class PCM16Encoder{
+  constructor(rate){ this.rate=rate; this._buf=[]; }
+  encode(float32){
+    const len=float32.length; const out=new Int16Array(len);
+    for(let i=0;i<len;i++){ let s=Math.max(-1, Math.min(1, float32[i])); out[i]=s<0?s*0x8000:s*0x7FFF; }
+    return new Uint8Array(out.buffer);
+  }
+}
+function base64Encode(uint8){
+  let str=""; const len=uint8.length;
+  for (let i=0;i<len;i++) str+=String.fromCharCode(uint8[i]);
+  return btoa(str);
+}
+let playbackCtx; let playTime=0;
+function ensurePlaybackCtx(rate){
+  if (!playbackCtx || playbackCtx.sampleRate!==rate){ playbackCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:rate}); playTime = playbackCtx.currentTime; }
+  return playbackCtx;
+}
+function playPcmBase64(b64, sampleRate){
+  const bytes = Uint8Array.from(atob(b64), c=>c.charCodeAt(0));
+  const view = new DataView(bytes.buffer);
+  const len = bytes.byteLength/2;
+  const ctx = ensurePlaybackCtx(sampleRate);
+  const buffer = ctx.createBuffer(1, len, sampleRate);
+  const ch = buffer.getChannelData(0);
+  for(let i=0;i<len;i++){ ch[i] = view.getInt16(i*2, true) / 0x8000; }
+  const src = ctx.createBufferSource(); src.buffer=buffer; src.connect(ctx.destination);
+  const now = ctx.currentTime;
+  if (playTime < now) playTime = now;
+  src.start(playTime);
+  playTime += buffer.duration;
+}
 </script>
 
 </body>

@@ -1,4 +1,4 @@
-# voiceapp/consumers.py
+# consumers.py
 import json
 from channels.generic.websocket import AsyncWebsocketConsumer
 import asyncio
@@ -8,12 +8,10 @@ import uuid
 
 class TranscriptConsumer(AsyncWebsocketConsumer):
     async def connect(self):
-        # per-connection group with safe name
         self.group_name = f"voice_{uuid.uuid4().hex}"
         await self.channel_layer.group_add(self.group_name, self.channel_name)
         await self.accept()
-        # Start background audio session if not already running for this connection
-        self._loop_task = None
+        # Start background audio session for this connection
         try:
             self._pya = pyaudio.PyAudio()
             self._audio = AudioLoop(self._pya, stdout=None, browser_mode=True, group_name=self.group_name)
@@ -35,9 +33,9 @@ class TranscriptConsumer(AsyncWebsocketConsumer):
                 self._pya.terminate()
         except Exception:
             pass
-    # Recieves user's audio from browser
+
+    # Receive user's audio from browser
     async def receive(self, text_data=None, bytes_data=None):
-        # Expect base64 audio frames from browser as JSON {type:"audio", data:"base64", mime:"audio/pcm;rate=16000"}
         if not text_data:
             return
         try:
@@ -54,25 +52,23 @@ class TranscriptConsumer(AsyncWebsocketConsumer):
             except Exception:
                 pass
 
+    # Handle transcript events from AudioLoop
     async def transcript_message(self, event):
-        # event = {"type": "transcript.message", "role": "user|assistant", "text": "..."}
+        # event = {"type": "transcript.message", "role": "user"|"assistant", "text": "..."}
         await self.send(text_data=json.dumps({
             "role": event["role"],
             "text": event["text"],
         }))
 
     async def status_message(self, event):
-        # event = {"type": "status.message", "role": "user|assistant", "speaking": bool}
         await self.send(text_data=json.dumps({
             "type": "status",
             "role": event["role"],
             "speaking": event["speaking"],
         }))
 
-    # Send my gemini's audio to the browser
-    # Gemini's response
+    # Send Gemini's audio to browser
     async def audio_message(self, event):
-        # event = {"type":"audio.message", "mime": str, "data": base64}
         await self.send(text_data=json.dumps({
             "type": "audio",
             "mime": event.get("mime"),
