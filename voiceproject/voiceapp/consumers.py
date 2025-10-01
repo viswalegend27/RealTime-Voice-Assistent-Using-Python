@@ -35,7 +35,7 @@ class TranscriptConsumer(AsyncWebsocketConsumer):
                 self._pya.terminate()
         except Exception:
             pass
-
+    # Recieves user's audio from browser
     async def receive(self, text_data=None, bytes_data=None):
         # Expect base64 audio frames from browser as JSON {type:"audio", data:"base64", mime:"audio/pcm;rate=16000"}
         if not text_data:
@@ -69,6 +69,8 @@ class TranscriptConsumer(AsyncWebsocketConsumer):
             "speaking": event["speaking"],
         }))
 
+    # Send my gemini's audio to the browser
+    # Gemini's response
     async def audio_message(self, event):
         # event = {"type":"audio.message", "mime": str, "data": base64}
         await self.send(text_data=json.dumps({

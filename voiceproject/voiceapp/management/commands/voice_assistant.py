@@ -19,47 +19,50 @@ from .prompts import AGENT_PROMPT
 for name in ("google.genai", "genai"):
     logging.getLogger(name).setLevel(logging.WARNING)
 
-
+# Audio format setter
 FORMAT, CHANNELS, CHUNK = pyaudio.paInt16, 1, 1024
+# The way product produce out and recieved 
 SEND_RATE, RECV_RATE = 16000, 24000
+# The model i currently use
 MODEL = "models/gemini-2.0-flash-exp"
 
+# Client setter
 client = genai.Client(
     api_key=getattr(settings, "GEMINI_API_KEY", None),
     http_options={"api_version": "v1beta"},
 )
 
-def normalize_transcript(text: str | None) -> str | None:
-    """Normalize spacing, merge letter-by-letter tokens, and tidy punctuation."""
-    if not text:
-        return text
-    text = re.sub(r"\s+", " ", text).strip()
-    tokens, out, i = text.split(), [], 0
+# def normalize_transcript(text: str | None) -> str | None:
+#     """Normalize spacing, merge letter-by-letter tokens, and tidy punctuation."""
+#     if not text:
+#         return text
+#     text = re.sub(r"\s+", " ", text).strip()
+#     tokens, out, i = text.split(), [], 0
 
-    while i < len(tokens):
-        t = tokens[i]
-        if len(t) == 1 and t.isalpha():
-            letters = [t]
-            i += 1
-            while i < len(tokens) and len(tokens[i]) == 1 and tokens[i].isalpha():
-                letters.append(tokens[i])
-                i += 1
-            out.append("".join(letters) if len(letters) > 1 else letters[0])
-        else:
-            out.append(t)
-            i += 1
+#     while i < len(tokens):
+#         t = tokens[i]
+#         if len(t) == 1 and t.isalpha():
+#             letters = [t]
+#             i += 1
+#             while i < len(tokens) and len(tokens[i]) == 1 and tokens[i].isalpha():
+#                 letters.append(tokens[i])
+#                 i += 1
+#             out.append("".join(letters) if len(letters) > 1 else letters[0])
+#         else:
+#             out.append(t)
+#             i += 1
 
-    text = " ".join(out)
-    for pat, rep in (
-        (r"\s+([,?.!;:])", r"\1"),
-        (r"\s+'", "'"),
-        (r"'\s+", "'"),
-        (r'\s+"', '"'),
-        (r'"\s+', '"'),
-        (r"\s{2,}", " "),
-    ):
-        text = re.sub(pat, rep, text)
-    return text.strip()
+#     text = " ".join(out)
+#     for pat, rep in (
+#         (r"\s+([,?.!;:])", r"\1"),
+#         (r"\s+'", "'"),
+#         (r"'\s+", "'"),
+#         (r'\s+"', '"'),
+#         (r'"\s+', '"'),
+#         (r"\s{2,}", " "),
+#     ):
+#         text = re.sub(pat, rep, text)
+#     return text.strip()
 
 class AudioLoop:
     """Minimal, robust audio <-> Gemini live loop with transcript persistence."""
@@ -94,6 +97,7 @@ class AudioLoop:
         except Exception:
             pass
 
+    # broadcast status browser or terminal
     async def _broadcast_status(self, role: str, speaking: bool):
         await self._broadcast({
             "type": "status.message",
@@ -126,6 +130,7 @@ class AudioLoop:
                         self.audio_in.read, CHUNK, exception_on_overflow=False
                     )
                     if data:
+                        # stores the audio inside an var
                         await self.to_send.put(
                             {"data": data, "mime_type": f"audio/pcm;rate={SEND_RATE}"}
                         )
@@ -138,7 +143,7 @@ class AudioLoop:
                 self.audio_in.close()
 
     # --- Gemini send/receive ---
-
+    # Recieves audio from browser
     async def _gemini_sender(self):
         while not self._stop.is_set():
             try:
@@ -151,6 +156,7 @@ class AudioLoop:
                     self.stdout.write(f"📤 Send error: {e}\n")
                 await asyncio.sleep(0.1)
 
+    # Sending the reply back
     async def _gemini_receiver(self):
         while not self._stop.is_set():
             try:
@@ -179,6 +185,7 @@ class AudioLoop:
                             if self.browser_mode:
                                 await self._emit_audio_to_clients(audio)
                             else:
+                                # gemini recives audio
                                 await self.received.put(audio)
 
                     # No transcript handling
@@ -234,6 +241,7 @@ class AudioLoop:
                 await self._broadcast_status("assistant", False)
 
     # --- Browser streaming helpers ---
+    # sends audio to gemini
     async def push_client_audio(self, pcm_bytes: bytes, mime_type: str = f"audio/pcm;rate={SEND_RATE}"):
         # Called by consumer when receiving audio from browser
         if not pcm_bytes:
@@ -243,6 +251,7 @@ class AudioLoop:
             await self._broadcast_status("user", True)
         await self.to_send.put({"data": pcm_bytes, "mime_type": mime_type})
 
+    # Sending audio to clients
     async def _emit_audio_to_clients(self, pcm_bytes: bytes):
         # Aggregate into ~100ms chunks to avoid choppy playback
         if not hasattr(self, "_out_buf"):
@@ -253,6 +262,7 @@ class AudioLoop:
         if should_emit:
             b64 = base64.b64encode(self._out_buf).decode("ascii")
             await self._broadcast({
+                # sends to the browser to the channels
                 "type": "audio.message",
                 "mime": f"audio/pcm;rate={RECV_RATE}",
                 "data": b64,
@@ -312,6 +322,7 @@ class AudioLoop:
 
     async def stop(self):
         self._stop.set()
+
 
 class Command(BaseCommand):
     help = "Starts a real-time voice chat with Gemini AI."
