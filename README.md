@@ -97,12 +97,6 @@ CHANNEL_LAYERS = {
 
 ```
 
-```
-# Add your Gemini API key
-GEMINI_API_KEY = "your-api-key-here" 
-To your .env file
-```
-
 ### 3. Environment Variables (Recommended)
 For better security, use environment variables:
 
