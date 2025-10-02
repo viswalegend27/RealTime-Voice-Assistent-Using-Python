@@ -1,4 +1,3 @@
-# voice_assistant.py
 import asyncio
 import time
 import base64
@@ -31,6 +30,7 @@ class AudioLoop:
         self.browser_mode = browser_mode
         self.group_name = group_name
 
+        # Queue variable for for capturing content
         self.to_send = asyncio.Queue(maxsize=10)
         self.received = asyncio.Queue()
 
@@ -69,6 +69,7 @@ class AudioLoop:
             "speaking": speaking,
         })
 
+    # Reads mic using PyAudio at 16 khz
     async def listen_audio(self):
         if self.browser_mode:
             return  # browser provides audio
@@ -90,6 +91,7 @@ class AudioLoop:
             if self.audio_in:
                 self.audio_in.close()
 
+    # Audio is pulled (PCM = audio chunks) from the set Queue
     async def _gemini_sender(self):
         while not self._stop.is_set():
             try:
@@ -109,15 +111,18 @@ class AudioLoop:
                         continue
 
                     # ---- Transcriptions (cumulative strings from Gemini) ----
+                    # Live user text 
                     input_trans = getattr(sc, "input_transcription", None)
                     if input_trans and getattr(input_trans, "text", None):
                         self.user_text = (input_trans.text or "").strip()
+                        # broadcast in format
                         await self._broadcast({
                             "type": "transcript.message",
                             "role": "user",
                             "text": self.user_text,
                         })
 
+                    # Gemini output transcript
                     output_trans = getattr(sc, "output_transcription", None)
                     if output_trans and getattr(output_trans, "text", None):
                         self.assistant_text = (output_trans.text or "").strip()
@@ -137,6 +142,9 @@ class AudioLoop:
                             data = getattr(blob, "data", None)
                             if not data:
                                 continue
+                            # Audio data
+                            # Audio data is not played directly into the browser
+                            # It breaks down into base64 code
                             audio = data if isinstance(data, bytes) else base64.b64decode(data)
 
                             if not self.bot_speaking:
@@ -145,8 +153,10 @@ class AudioLoop:
 
                             # mark last TTS time
                             self._last_tts_audio_ts = time.time()
-
+                            
+                            # Output to the browser
                             if self.browser_mode:
+                                # output through done using the socket
                                 await self._emit_audio_to_clients(audio)
                             else:
                                 await self.received.put(audio)
@@ -165,6 +175,7 @@ class AudioLoop:
             while not self._stop.is_set():
                 if not stream:
                     stream = await asyncio.to_thread(
+                        # Plays out our audio in the browser
                         self.pya.open,
                         format=FORMAT, channels=CHANNELS, rate=RECV_RATE, output=True
                     )
@@ -223,6 +234,7 @@ class AudioLoop:
             except Exception:
                 pass
 
+    # Feeds the browser chunks to the web-socket consumer
     async def push_client_audio(self, pcm_bytes: bytes, mime_type: str = f"audio/pcm;rate={SEND_RATE}"):
         if not pcm_bytes:
             return
@@ -239,6 +251,7 @@ class AudioLoop:
         should_emit = len(self._out_buf) >= 4800 or (time.time() - self._last_emit) > 0.2
         if should_emit:
             b64 = base64.b64encode(self._out_buf).decode("ascii")
+            # Send the data from model to browser using channels.
             await self._broadcast({
                 "type": "audio.message",
                 "mime": f"audio/pcm;rate={RECV_RATE}",

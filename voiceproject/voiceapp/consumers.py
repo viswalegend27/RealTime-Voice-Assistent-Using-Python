@@ -50,9 +50,9 @@ class TranscriptConsumer(AsyncWebsocketConsumer):
         if data.get("type") == "audio" and "data" in data:
             try:
                 import base64
-                pcm = base64.b64decode(data["data"])
-                mime = data.get("mime") or f"audio/pcm;rate=16000"
-                if getattr(self, "_audio", None):
+                pcm = base64.b64decode(data["data"]) # base 64 decoded audio
+                mime = data.get("mime") or f"audio/pcm;rate=16000" # data key information
+                if getattr(self, "_audio", None): # if data recieved then push into client 
                     await self._audio.push_client_audio(pcm, mime)
             except Exception:
                 pass
@@ -65,6 +65,7 @@ class TranscriptConsumer(AsyncWebsocketConsumer):
             "text": event["text"],
         }))
 
+    # function determined to display the state where the user speaks
     async def status_message(self, event):
         await self.send(text_data=json.dumps({
             "type": "status",
