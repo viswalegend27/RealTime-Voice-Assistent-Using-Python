@@ -42,6 +42,11 @@ class TranscriptConsumer(AsyncWebsocketConsumer):
             data = json.loads(text_data)
         except Exception:
             return
+
+        # ignore keepalive pings
+        if data.get("type") == "ping":
+            return
+
         if data.get("type") == "audio" and "data" in data:
             try:
                 import base64
@@ -73,4 +78,5 @@ class TranscriptConsumer(AsyncWebsocketConsumer):
             "type": "audio",
             "mime": event.get("mime"),
             "data": event.get("data"),
+            "rate": 24000,
         }))

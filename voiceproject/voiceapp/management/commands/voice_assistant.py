@@ -19,21 +19,42 @@ client = genai.Client(
     http_options={"api_version": "v1beta"},
 )
 
+USER_SILENCE_MS = 700          # if no mic frames in this window, we commit user's utterance
+ASSIST_SILENCE_MS = 250        # if no TTS frames in this window, we commit assistant's utterance
+HEARTBEAT_PERIOD_S = 0.2       # tighter heartbeat for snappier state transitions
+
 class AudioLoop:
-    """Live audio loop with transcription enabled."""
+    """Live audio loop with transcription enabled and DB persistence."""
     def __init__(self, pya_instance, stdout, browser_mode=False, group_name="voice_transcripts"):
         self.pya = pya_instance
         self.stdout = stdout
         self.browser_mode = browser_mode
         self.group_name = group_name
+
         self.to_send = asyncio.Queue(maxsize=10)
         self.received = asyncio.Queue()
+
         self.audio_in = None
         self._stop = asyncio.Event()
+
+        # speaking state + timers
         self.user_speaking = False
         self.bot_speaking = False
+        self._last_user_audio_ts = 0.0
+        self._last_tts_audio_ts = 0.0
+
+        # transcript buffers (latest cumulative strings)
+        self.user_text = ""
+        self.assistant_text = ""
+        self._saved_user_text = ""
+        self._saved_assistant_text = ""
+
         self.conversation_id = None
         self.channel_layer = get_channel_layer()
+
+        # browser playback buffer variables
+        self._out_buf = bytearray()
+        self._last_emit = 0.0
 
     async def _broadcast(self, event: dict):
         try:
@@ -50,7 +71,7 @@ class AudioLoop:
 
     async def listen_audio(self):
         if self.browser_mode:
-            return  # Browser sends audio
+            return  # browser provides audio
         mic_info = self.pya.get_default_input_device_info()
         self.audio_in = await asyncio.to_thread(
             self.pya.open,
@@ -62,7 +83,8 @@ class AudioLoop:
                 data = await asyncio.to_thread(self.audio_in.read, CHUNK, exception_on_overflow=False)
                 if data:
                     await self.to_send.put({"data": data, "mime_type": f"audio/pcm;rate={SEND_RATE}"})
-        except Exception as e:
+                    self._last_user_audio_ts = time.time()
+        except Exception:
             pass
         finally:
             if self.audio_in:
@@ -76,7 +98,7 @@ class AudioLoop:
             except asyncio.CancelledError:
                 break
             except Exception:
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.05)
 
     async def _gemini_receiver(self):
         while not self._stop.is_set():
@@ -86,23 +108,26 @@ class AudioLoop:
                     if not sc:
                         continue
 
-                    # Transcription: user (input) and assistant (output)
+                    # ---- Transcriptions (cumulative strings from Gemini) ----
                     input_trans = getattr(sc, "input_transcription", None)
                     if input_trans and getattr(input_trans, "text", None):
+                        self.user_text = (input_trans.text or "").strip()
                         await self._broadcast({
                             "type": "transcript.message",
                             "role": "user",
-                            "text": input_trans.text,
+                            "text": self.user_text,
                         })
+
                     output_trans = getattr(sc, "output_transcription", None)
                     if output_trans and getattr(output_trans, "text", None):
+                        self.assistant_text = (output_trans.text or "").strip()
                         await self._broadcast({
                             "type": "transcript.message",
                             "role": "assistant",
-                            "text": output_trans.text,
+                            "text": self.assistant_text,
                         })
 
-                    # Audio chunks
+                    # ---- Audio chunks from model ----
                     mt = getattr(sc, "model_turn", None)
                     if mt:
                         for part in getattr(mt, "parts", []):
@@ -113,19 +138,24 @@ class AudioLoop:
                             if not data:
                                 continue
                             audio = data if isinstance(data, bytes) else base64.b64decode(data)
+
                             if not self.bot_speaking:
                                 self.bot_speaking = True
                                 await self._broadcast_status("assistant", True)
+
+                            # mark last TTS time
+                            self._last_tts_audio_ts = time.time()
+
                             if self.browser_mode:
                                 await self._emit_audio_to_clients(audio)
                             else:
                                 await self.received.put(audio)
 
-                    await asyncio.sleep(0.05)
+                await asyncio.sleep(0.02)
             except asyncio.CancelledError:
                 break
             except Exception:
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.1)
 
     async def play_audio(self):
         if self.browser_mode:
@@ -148,25 +178,64 @@ class AudioLoop:
                 stream.close()
 
     async def _status_heartbeat(self):
+        """Drives speaking state transitions + commits to DB when utterances end."""
         while not self._stop.is_set():
-            await asyncio.sleep(0.6)
-            if self.bot_speaking and ((self.browser_mode) or self.received.empty()):
-                self.bot_speaking = False
-                await self._broadcast_status("assistant", False)
+            now = time.time()
+
+            # ----- USER speaking end by silence -----
+            if self.user_speaking and (now - self._last_user_audio_ts) * 1000 > USER_SILENCE_MS:
+                self.user_speaking = False
+                await self._broadcast_status("user", False)
+                await self._commit_user_if_ready()
+
+            # ----- ASSISTANT speaking end by silence -----
+            if self.bot_speaking:
+                if self.browser_mode:
+                    quiet_ms = (now - (self._last_tts_audio_ts or now)) * 1000
+                    if quiet_ms > ASSIST_SILENCE_MS:
+                        self.bot_speaking = False
+                        await self._broadcast_status("assistant", False)
+                        await self._commit_assistant_if_ready()
+                else:
+                    # speaker mode: queue empty is a good signal
+                    if self.received.empty():
+                        self.bot_speaking = False
+                        await self._broadcast_status("assistant", False)
+                        await self._commit_assistant_if_ready()
+
+            await asyncio.sleep(HEARTBEAT_PERIOD_S)
+
+    async def _commit_user_if_ready(self):
+        text = (self.user_text or "").strip()
+        if text and text != self._saved_user_text:
+            try:
+                await getsave_message(self.conversation_id, "user", text)
+                self._saved_user_text = text
+            except Exception:
+                pass
+
+    async def _commit_assistant_if_ready(self):
+        text = (self.assistant_text or "").strip()
+        if text and text != self._saved_assistant_text:
+            try:
+                await getsave_message(self.conversation_id, "assistant", text)
+                self._saved_assistant_text = text
+            except Exception:
+                pass
 
     async def push_client_audio(self, pcm_bytes: bytes, mime_type: str = f"audio/pcm;rate={SEND_RATE}"):
         if not pcm_bytes:
             return
+        self._last_user_audio_ts = time.time()
         if not self.user_speaking:
             self.user_speaking = True
             await self._broadcast_status("user", True)
         await self.to_send.put({"data": pcm_bytes, "mime_type": mime_type})
 
     async def _emit_audio_to_clients(self, pcm_bytes: bytes):
-        if not hasattr(self, "_out_buf"):
-            self._out_buf = bytearray()
-            self._last_emit = time.time()
+        # coalesce tiny chunks for smoother playback
         self._out_buf += pcm_bytes
+        self._last_emit = time.time()
         should_emit = len(self._out_buf) >= 4800 or (time.time() - self._last_emit) > 0.2
         if should_emit:
             b64 = base64.b64encode(self._out_buf).decode("ascii")
@@ -176,7 +245,6 @@ class AudioLoop:
                 "data": b64,
             })
             self._out_buf = bytearray()
-            self._last_emit = time.time()
 
     async def run(self):
         try:
@@ -223,6 +291,12 @@ class AudioLoop:
             if self.stdout:
                 self.stdout.write(f"💥 Run error: {e}\n")
         finally:
+            # final commit of any buffered text
+            try:
+                await self._commit_user_if_ready()
+                await self._commit_assistant_if_ready()
+            except Exception:
+                pass
             if self.stdout:
                 self.stdout.write("👋 Session ended.\n")
 
