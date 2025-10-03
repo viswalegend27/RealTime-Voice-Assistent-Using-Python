@@ -1,193 +1,298 @@
-<!-- index.html -->
+<!-- index.html (optimized) -->
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Voice Assistant</title>
+  <meta charset="utf-8" />
+  <title>Voice Assistant — Optimized</title>
   <style>
-    body { font-family: sans-serif; }
-    #status { margin-bottom: 1em; }
-    #transcript { border: 1px solid #ccc; padding: 1em; height: 300px; overflow-y: scroll; }
-    #transcript p { margin: 0.4em 0; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    #status { margin: .5rem 0; color: #666; }
+    #transcript { border: 1px solid #ddd; padding: 1rem; height: 320px; overflow-y: auto; }
+    #transcript p { margin: .4rem 0; }
     .msg-text { white-space: pre-wrap; }
+    #enableMic { margin:.5rem 0; padding:.5rem .9rem; border:0; border-radius:8px; background:#0a84ff; color:#fff; font-size:15px; cursor:pointer; }
+    #enableMic.off { background:#2f2f2f; }
+    #enableMic:disabled { background:#9aa0a6; cursor:not-allowed; }
+    .led { display:inline-block; width:.7rem; height:.7rem; border-radius:50%; margin-left:.5rem; vertical-align:middle; background:#c62828; box-shadow:0 0 0 2px #fff inset; }
+    .led.on { background:#2e7d32; }
   </style>
 </head>
 <body>
   <h1>Voice Assistant</h1>
-  <button id="enableMic" style="margin:6px 0;">Enable microphone</button>
+  <button id="enableMic" class="off">Enable Microphone <span id="led" class="led" title="Mic status"></span></button>
   <div id="whoSpeaking" style="margin-bottom:8px;color:#333;">Ready.</div>
-  <div id="status" style="margin-bottom:8px;color:#666;">Status: Connecting…</div>
-  <div id="transcript"></div> <!-- Transcript area -->
+  <div id="status">Status: Connecting…</div>
+  <div id="transcript"></div>
 
 <script>
-const statusDiv = document.getElementById('status');
-const enableBtn = document.getElementById('enableMic');
-const whoDiv = document.getElementById('whoSpeaking');
-const transcriptDiv = document.getElementById('transcript');
+(() => {
+  'use strict';
 
-// ---------- Persistent transcript state ----------
-let activeRole = null;                                 // whose turn is active right now
-const lastMsgEl = { user: null, assistant: null };     // last <p> node for each role
-const buffers   = { user: '',  assistant: ''  };       // current text per role
+  // ====== Config ======
+  const CAPTURE_RATE = 16000;   // input sample rate
+  const PLAYBACK_RATE = 24000;  // output sample rate
+  const PROC_CHUNK   = 2048;    // script processor buffer size
+  const SEND_HZ      = 50;      // send 50 times/sec (every 20ms)
+  const SEND_PERIOD  = 1000 / SEND_HZ;
+  const MAX_BATCH    = 16000 / SEND_HZ * 2; // ~640 bytes @16kHz, 16-bit mono
+  const RECONNECT_MAX_DELAY = 8000; // ms
 
-function startNewTurn(role) {
-  const speaker = role === 'user' ? 'You' : 'Assistant';
-  const p = document.createElement('p');
-  p.innerHTML = `<strong>${speaker}:</strong> <span class="msg-text"></span>`;
-  transcriptDiv.appendChild(p);
-  lastMsgEl[role] = p;
-  buffers[role] = '';
-  activeRole = role;
-}
+  // ====== DOM ======
+  const statusDiv   = document.getElementById('status');
+  const enableBtn   = document.getElementById('enableMic');
+  const led         = document.getElementById('led');
+  const whoDiv      = document.getElementById('whoSpeaking');
+  const transcriptDiv = document.getElementById('transcript');
 
-function smartMerge(current, incoming) {
-  // 1) Cumulative update (incoming already contains current as prefix)
-  if (incoming.startsWith(current)) return incoming;
+  // ====== Transcript state (batched DOM updates) ======
+  let activeRole = null;
+  const lastMsgEl = { user: null, assistant: null };
+  const buffers   = { user: '',  assistant: ''  };
+  let needsFlush = false; // flag to coalesce DOM writes
 
-  // 2) If incoming is shorter and is a prefix of current, keep the longer one
-  if (current.startsWith(incoming)) return current;
-
-  // 3) Otherwise, find the longest overlap between the end of current and start of incoming
-  const maxCheck = Math.min(80, current.length, incoming.length);
-  let k = 0;
-  for (let len = maxCheck; len > 0; len--) {
-    if (current.slice(-len) === incoming.slice(0, len)) { k = len; break; }
+  function startNewTurn(role) {
+    const speaker = role === 'user' ? 'You' : 'Assistant';
+    const p = document.createElement('p');
+    p.innerHTML = `<strong>${speaker}:</strong> <span class="msg-text"></span>`;
+    lastMsgEl[role] = p;
+    buffers[role] = '';
+    activeRole = role;
+    transcriptDiv.appendChild(p);
+    needsFlush = true;
   }
-  let tail = incoming.slice(k);
 
-  // 4) Only insert a space if both sides are ASCII word chars and no punctuation at the boundary
-  const needSpace =
-    k === 0 &&
-    /[A-Za-z0-9]$/.test(current) &&
-    /^[A-Za-z0-9]/.test(incoming) &&
-    !/^[,.!?;:)]/.test(incoming);
-
-  return current + (needSpace ? ' ' : '') + tail;
-}
-
-function upsertTranscript(role, incomingText) {
-  if (activeRole !== role || !lastMsgEl[role]) {
-    startNewTurn(role);
+  function smartMerge(current, incoming) {
+    if (incoming.startsWith(current)) return incoming;
+    if (current.startsWith(incoming)) return current;
+    const maxCheck = Math.min(80, current.length, incoming.length);
+    let k = 0;
+    for (let len = maxCheck; len > 0; len--) {
+      if (current.slice(-len) === incoming.slice(0, len)) { k = len; break; }
+    }
+    const needSpace = k === 0 && /[A-Za-z0-9]$/.test(current) && /^[A-Za-z0-9]/.test(incoming);
+    return current + (needSpace ? ' ' : '') + incoming.slice(k);
   }
-  const merged = smartMerge(buffers[role] || '', String(incomingText || ''));
-  buffers[role] = merged;
-  lastMsgEl[role].querySelector('.msg-text').textContent = merged;
-  transcriptDiv.scrollTop = transcriptDiv.scrollHeight;
-}
 
-// ---------- WebSocket hookup ----------
-function connectWS() {
-  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-  const socket = new WebSocket(`${proto}://${window.location.host}/ws/voice/`);
-  window.ws = socket;
-
-  socket.onopen = () => { statusDiv.textContent = 'Status: Connected'; enableBtn.disabled = false; };
-  socket.onclose = () => {
-    statusDiv.textContent = 'Status: Disconnected — retrying…';
-    stopMic();
-    setTimeout(connectWS, 1000);
-  };
-  socket.onerror = (e) => console.log('WS error', e);
-
-  socket.onmessage = (e) => {
-    const data = JSON.parse(e.data);
-
-    // Speaking status: informative only; new turn starts when role changes via transcript
-    if (data.type === 'status') {
-      whoDiv.textContent = data.speaking
-        ? (data.role === 'user' ? 'You are speaking…' : 'Assistant is speaking…')
-        : 'Ready.';
-      return;
+  function upsertTranscript(role, incomingText) {
+    if (activeRole !== role || !lastMsgEl[role]) startNewTurn(role);
+    const merged = smartMerge(buffers[role] || '', String(incomingText || ''));
+    if (merged !== buffers[role]) {
+      buffers[role] = merged;
+      needsFlush = true;
     }
+  }
 
-    // Audio playback
-    // Plays the audio in the browser using socket connection
-    if (data.type === 'audio' && data.data) {
-      playPcmBase64(data.data, 24000);
-      return;
+  // Batch DOM updates to animation frames (<= 60fps)
+  function rafFlush() {
+    if (needsFlush) {
+      for (const role of ['user','assistant']) {
+        const p = lastMsgEl[role];
+        if (p) p.querySelector('.msg-text').textContent = buffers[role];
+      }
+      transcriptDiv.scrollTop = transcriptDiv.scrollHeight;
+      needsFlush = false;
     }
+    requestAnimationFrame(rafFlush);
+  }
+  requestAnimationFrame(rafFlush);
 
-    // Streaming transcript chunk (may be partial, suffix, or cumulative)
-    if (data.role && typeof data.text === 'string') {
-      upsertTranscript(data.role, data.text);
-      return;
-    }
-  };
-}
+  // ====== WebSocket with exponential backoff ======
+  let ws; let reconnectDelay = 500; let reconnectTimer;
+  function connectWS() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/ws/voice/`);
 
-connectWS();
-enableBtn.disabled = true;
+    ws.onopen = () => {
+      statusDiv.textContent = 'Status: Connected';
+      enableBtn.disabled = false;
+      reconnectDelay = 500; // reset backoff
+    };
 
-// ---------- Mic capture and send ----------
-let mediaStream; let audioCtx; let processor; let source;
-async function startMic(socket){
-  try{
-    mediaStream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,sampleRate:16000}, video:false});
-    audioCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:16000});
-    source = audioCtx.createMediaStreamSource(mediaStream);
-    processor = audioCtx.createScriptProcessor(1024,1,1);
-    const encoder = new PCM16Encoder(16000);
-    processor.onaudioprocess = (ev)=>{
-      const input = ev.inputBuffer.getChannelData(0);
-      const chunk = encoder.encode(input);
-      if (chunk && socket.readyState===1){
-        const b64 = base64Encode(chunk);
-        // Retrieves the user audio and send over websocket
-        socket.send(JSON.stringify({type:'audio', mime:'audio/pcm;rate=16000', data:b64}));
+    ws.onclose = () => {
+      statusDiv.textContent = 'Status: Disconnected — retrying…';
+      stopMic();
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(connectWS, reconnectDelay);
+      reconnectDelay = Math.min(RECONNECT_MAX_DELAY, reconnectDelay * 2);
+    };
+
+    ws.onerror = (e) => console.warn('WS error', e);
+
+    ws.onmessage = (e) => {
+      const data = JSON.parse(e.data);
+
+      if (data.type === 'status') {
+        whoDiv.textContent = data.speaking
+          ? (data.role === 'user' ? 'You are speaking…' : 'Assistant is speaking…')
+          : 'Ready.';
+        return;
+      }
+
+      if (data.type === 'audio' && data.data) {
+        playPcmBase64(data.data, PLAYBACK_RATE);
+        return;
+      }
+
+      if (data.role && typeof data.text === 'string') {
+        upsertTranscript(data.role, data.text);
+        return;
       }
     };
-    source.connect(processor); processor.connect(audioCtx.destination);
-  }catch(e){ console.log('Mic error', e); statusDiv.textContent = 'Mic error: ' + (e && e.message ? e.message : e); }
-}
-enableBtn.addEventListener('click', () => {
-  if (!window.ws || window.ws.readyState !== 1){ statusDiv.textContent = 'Status: Connecting… please wait'; return; }
-  startMic(window.ws);
-  enableBtn.disabled = true; enableBtn.textContent = 'Microphone enabled';
-});
-
-function stopMic(){
-  try{
-    if (processor){ processor.disconnect(); processor.onaudioprocess=null; processor=null; }
-    if (source){ source.disconnect(); source=null; }
-    if (audioCtx){ audioCtx.close(); audioCtx=null; }
-    if (mediaStream){ mediaStream.getTracks().forEach(t=>t.stop()); mediaStream=null; }
-    enableBtn.disabled = false; enableBtn.textContent = 'Enable microphone';
-  }catch(_){ }
-}
-
-// ---------- Utilities ----------
-class PCM16Encoder{
-  constructor(rate){ this.rate=rate; this._buf=[]; }
-  encode(float32){
-    const len=float32.length; const out=new Int16Array(len);
-    for(let i=0;i<len;i++){ let s=Math.max(-1, Math.min(1, float32[i])); out[i]=s<0?s*0x8000:s*0x7FFF; }
-    return new Uint8Array(out.buffer);
   }
-}
-function base64Encode(uint8){
-  let str=""; const len=uint8.length;
-  for (let i=0;i<len;i++) str+=String.fromCharCode(uint8[i]);
-  return btoa(str);
-}
-let playbackCtx; let playTime=0;
-function ensurePlaybackCtx(rate){
-  if (!playbackCtx || playbackCtx.sampleRate!==rate){ playbackCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:rate}); playTime = playbackCtx.currentTime; }
-  return playbackCtx;
-}
-function playPcmBase64(b64, sampleRate){
-  const bytes = Uint8Array.from(atob(b64), c=>c.charCodeAt(0));
-  const view = new DataView(bytes.buffer);
-  const len = bytes.byteLength/2;
-  const ctx = ensurePlaybackCtx(sampleRate);
-  const buffer = ctx.createBuffer(1, len, sampleRate);
-  const ch = buffer.getChannelData(0);
-  for(let i=0;i<len;i++){ ch[i] = view.getInt16(i*2, true) / 0x8000; }
-  const src = ctx.createBufferSource(); src.buffer=buffer; src.connect(ctx.destination);
-  const now = ctx.currentTime;
-  if (playTime < now) playTime = now;
-  src.start(playTime);
-  playTime += buffer.duration;
-}
-</script>
+  connectWS();
+  enableBtn.disabled = true;
 
+  // ====== Audio capture, batching & send ======
+  let mediaStream, audioCtx, processor, source;
+  let micEnabled = false;
+  let batch = new Uint8Array(0); // rolling buffer of encoded PCM16
+  let sendTimer = null;
+
+  class PCM16Encoder {
+    constructor(rate){ this.rate = rate; }
+    encode(float32){
+      const len=float32.length; const out=new Int16Array(len);
+      for(let i=0;i<len;i++){
+        let s=float32[i];
+        s = s < -1 ? -1 : (s > 1 ? 1 : s);
+        out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      return new Uint8Array(out.buffer);
+    }
+  }
+
+  function concatU8(a,b){
+    if (!a || a.length === 0) return b;
+    if (!b || b.length === 0) return a;
+    const out = new Uint8Array(a.length + b.length);
+    out.set(a,0); out.set(b,a.length);
+    return out;
+  }
+
+  function base64Encode(uint8){
+    // Chunked to avoid stack/surrogate pressure on large arrays
+    const CHUNK = 0x8000; // 32KB
+    let result = '';
+    for (let i=0; i<uint8.length; i+=CHUNK){
+      const slice = uint8.subarray(i, i+CHUNK);
+      result += String.fromCharCode.apply(null, slice);
+    }
+    return btoa(result);
+  }
+
+  function startSendLoop(){
+    if (sendTimer) return;
+    sendTimer = setInterval(() => {
+      if (!ws || ws.readyState !== 1) return;
+      if (!batch || batch.length === 0) return;
+
+      // take up to MAX_BATCH bytes per tick
+      const n = Math.min(MAX_BATCH, batch.length);
+      const toSend = batch.subarray(0, n);
+      batch = batch.subarray(n);
+
+      const b64 = base64Encode(toSend);
+      ws.send(JSON.stringify({ type:'audio', mime:`audio/pcm;rate=${CAPTURE_RATE}`, data:b64 }));
+    }, SEND_PERIOD);
+  }
+
+  function stopSendLoop(){
+    if (sendTimer){ clearInterval(sendTimer); sendTimer=null; }
+  }
+
+  async function startMic(socket){
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount:1, sampleRate: CAPTURE_RATE }, video:false });
+      audioCtx = new (window.AudioContext||window.webkitAudioContext)({ sampleRate: CAPTURE_RATE });
+      source = audioCtx.createMediaStreamSource(mediaStream);
+      processor = audioCtx.createScriptProcessor(PROC_CHUNK,1,1);
+      const encoder = new PCM16Encoder(CAPTURE_RATE);
+
+      processor.onaudioprocess = (ev) => {
+        const input = ev.inputBuffer.getChannelData(0);
+        const encoded = encoder.encode(input);
+        // Append to batch; let sender flush at fixed cadence
+        batch = concatU8(batch, encoded);
+      };
+
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+
+      micEnabled = true;
+      enableBtn.classList.remove('off');
+      led.classList.add('on');
+      enableBtn.textContent = 'Disable Microphone ';
+      enableBtn.appendChild(led);
+      statusDiv.textContent = 'Microphone enabled';
+
+      startSendLoop();
+    } catch (e) {
+      console.error('Mic error', e);
+      statusDiv.textContent = 'Mic error: ' + (e && e.message ? e.message : e);
+    }
+  }
+
+  function stopMic(){
+    try {
+      if (processor){ processor.disconnect(); processor.onaudioprocess=null; processor=null; }
+      if (source){ source.disconnect(); source=null; }
+      if (audioCtx){ audioCtx.close(); audioCtx=null; }
+      if (mediaStream){ mediaStream.getTracks().forEach(t=>t.stop()); mediaStream=null; }
+      batch = new Uint8Array(0);
+    } catch(_){}
+
+    micEnabled = false;
+    enableBtn.classList.add('off');
+    led.classList.remove('on');
+    enableBtn.textContent = 'Enable Microphone ';
+    enableBtn.appendChild(led);
+    statusDiv.textContent = 'Microphone disabled';
+
+    stopSendLoop();
+  }
+
+  // Toggle button
+  enableBtn.addEventListener('click', () => {
+    if (!ws || ws.readyState !== 1){ statusDiv.textContent = 'Status: Connecting… please wait'; return; }
+    if (!micEnabled) startMic(ws); else stopMic();
+  });
+
+  // ====== Playback (coalesced scheduling) ======
+  let playbackCtx; let playTime = 0;
+  function ensurePlaybackCtx(rate){
+    if (!playbackCtx || playbackCtx.sampleRate !== rate){
+      playbackCtx = new (window.AudioContext||window.webkitAudioContext)({ sampleRate: rate });
+      playTime = playbackCtx.currentTime;
+    }
+    return playbackCtx;
+  }
+
+  function playPcmBase64(b64, sampleRate){
+    const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    const view = new DataView(bytes.buffer);
+    const len = bytes.byteLength >> 1; // / 2
+    const ctx = ensurePlaybackCtx(sampleRate);
+    const buffer = ctx.createBuffer(1, len, sampleRate);
+    const ch = buffer.getChannelData(0);
+    for(let i=0;i<len;i++){ ch[i] = view.getInt16(i<<1, true) / 0x8000; }
+    const src = ctx.createBufferSource(); src.buffer=buffer; src.connect(ctx.destination);
+    const now = ctx.currentTime; if (playTime < now) playTime = now;
+    src.start(playTime); playTime += buffer.duration;
+  }
+
+  // ====== Page lifecycle niceties ======
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && micEnabled) {
+      // Pause capture when tab hidden (saves CPU/bandwidth)
+      stopMic();
+    }
+  });
+
+  window.addEventListener('beforeunload', () => {
+    stopMic();
+    try { ws && ws.close(); } catch(_){}
+  });
+})();
+</script>
 </body>
 </html>

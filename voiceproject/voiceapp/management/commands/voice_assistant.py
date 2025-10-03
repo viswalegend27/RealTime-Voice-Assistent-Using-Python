@@ -247,8 +247,8 @@ class AudioLoop:
     async def _emit_audio_to_clients(self, pcm_bytes: bytes):
         # coalesce tiny chunks for smoother playback
         self._out_buf += pcm_bytes
-        self._last_emit = time.time()
-        should_emit = len(self._out_buf) >= 4800 or (time.time() - self._last_emit) > 0.2
+        elapsed = time.time() - (self._last_emit or 0.0)
+        should_emit = len(self._out_buf) >= 4800 or elapsed > 0.2
         if should_emit:
             b64 = base64.b64encode(self._out_buf).decode("ascii")
             # Send the data from model to browser using channels.
@@ -258,6 +258,7 @@ class AudioLoop:
                 "data": b64,
             })
             self._out_buf = bytearray()
+            self._last_emit = time.time()
 
     async def run(self):
         try:
@@ -285,6 +286,13 @@ class AudioLoop:
 
             async with client.aio.live.connect(model=MODEL, config=config) as session:
                 self.session = session
+                try:
+                    await self.session.send(input={
+                        "text": "Start the conversation with a brief greeting and the first question."
+                    })
+                except Exception as e:
+                    if self.stdout:
+                        self.stdout.write(f"[init] failed to request first response: {e}\n")                
                 if self.stdout:
                     self.stdout.write("💬 Voice chat started — press Ctrl+C to stop.\n")
 
