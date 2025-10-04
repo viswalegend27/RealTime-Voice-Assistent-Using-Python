@@ -51,12 +51,13 @@ Inside your virtual environment
 django-admin startproject voiceproject
 cd voiceproject
 python manage.py startapp voice_assistant
-
-After initializing the channels and WebSocket connection 
+```
+### 5. After initializing the channels and WebSocket connection 
+```bash
 daphne -b 0.0.0.0 -p 8000 voiceproject.asgi:application
 ```
 
-### 5. Add the Voice Assistant Code
+### 6. Add the Voice Assistant Code
 - Copy `voice_assistant_optimized.py` to `voiceproject/voice_assistant/management/commands/voice_assistant.py`
 - Create the necessary directory structure:
 ```bash
