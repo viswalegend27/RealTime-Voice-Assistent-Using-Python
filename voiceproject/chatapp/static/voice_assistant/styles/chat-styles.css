@@ -1,0 +1,62 @@
+body {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+/* Status text */
+#status {
+  margin: 0.5rem 0;
+  color: #666;
+}
+
+/* Transcript box */
+#transcript {
+  border: 1px solid #ddd;
+  padding: 1rem;
+  height: 320px;
+  overflow-y: auto;
+}
+
+#transcript p {
+  margin: 0.4rem 0;
+}
+
+.msg-text {
+  white-space: pre-wrap;
+}
+
+/* Microphone button */
+#enableMic {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.9rem;
+  border: none;
+  border-radius: 8px;
+  background: #0a84ff;
+  color: #fff;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+#enableMic.off {
+  background: #2f2f2f;
+}
+
+#enableMic:disabled {
+  background: #9aa0a6;
+  cursor: not-allowed;
+}
+
+/* LED indicator */
+.led {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  margin-left: 0.5rem;
+  vertical-align: middle;
+  background: #c62828;
+  box-shadow: 0 0 0 2px #fff inset;
+}
+
+.led.on {
+  background: #2e7d32;
+}
