@@ -269,9 +269,19 @@ python manage.py voice_assistant
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-## Architecture / Flow Diagram
+# Voice Assistant System Documentation
 
+## 1. System Architecture and Functionality
+This diagram provides a high-level overview of the application's components and how the AI assistant operates.
 ![Flow diagram](./Flow-diagram.png)
+
+## 2. Voice Assistant Payload Flow
+This diagram illustrates the journey of structured data payloads between the browser, the server, and the Gemini API.
+![Flow diagram](./Flow-diagram-payload.png)
+
+## 3. Real-time Audio Data Flow
+This diagram shows the detailed, real-time stream of audio data chunks as they move through the system, from the user's microphone to their speakers.
+![Flow diagram](./Flow-diagram-dataflow.png)
 
 ## Acknowledgments
 
