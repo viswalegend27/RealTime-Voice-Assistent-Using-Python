@@ -109,7 +109,6 @@ class AudioLoop:
         while not self._stop.is_set():
             try:
                 async for resp in self.session.receive():
-                    # Seeing my third payload
                     # print(f"<-- RECEIVED FROM GEMINI: {resp}")
                     # print("\n" + "="*20 + " NEW OBJECT RECEIVED " + "="*20)
                     # print(f"Object Type: {type(resp)}")
@@ -180,8 +179,9 @@ class AudioLoop:
                 await asyncio.sleep(0.1)
 
     async def play_audio(self):
-        if self.browser_mode: 
-        # If the app is in browser mode, this function does nothing and exits immediately.
+        if self.browser_mode:
+            # It does not plays out the sound in browser mode.
+            # Plays the audio in the terminal the below does that
             return
         stream = None
         try:
@@ -256,8 +256,7 @@ class AudioLoop:
             self.user_speaking = True
             await self._broadcast_status("user", True)
         await self.to_send.put({"data": pcm_bytes, "mime_type": mime_type})
-        
-    # This is the function that sends audio TO the browser
+
     async def _emit_audio_to_clients(self, pcm_bytes: bytes):
         # coalesce tiny chunks for smoother playback
         self._out_buf += pcm_bytes
