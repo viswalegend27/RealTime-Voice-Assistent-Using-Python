@@ -380,6 +380,8 @@
    * @param {string} b64 The Base64 encoded audio data.
    * @param {number} sampleRate The sample rate of the audio.
    */
+  // Plays actual decoded audio in the browser by capturing the upcoming data as JSON b64 [Extracts the data] 
+  // Decodes and play the audio
   function playPcmBase64(b64, sampleRate) {
     if (!b64) return;
     let bytes;
