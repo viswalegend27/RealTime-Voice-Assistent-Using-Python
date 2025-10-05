@@ -110,6 +110,13 @@ class AudioLoop:
             try:
                 async for resp in self.session.receive():
                     # print(f"<-- RECEIVED FROM GEMINI: {resp}")
+                    # print("\n" + "="*20 + " NEW OBJECT RECEIVED " + "="*20)
+                    # print(f"Object Type: {type(resp)}")
+                    # print("--- Full Object Content ---")
+                    # print(resp)
+                    # print("--- Available Attributes ---")
+                    # print(dir(resp))
+                    # print("="*60 + "\n")
                     sc = getattr(resp, "server_content", None)
                     if not sc:
                         continue
