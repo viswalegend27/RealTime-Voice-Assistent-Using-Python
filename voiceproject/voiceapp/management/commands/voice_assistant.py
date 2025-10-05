@@ -58,6 +58,7 @@ class AudioLoop:
 
     async def _broadcast(self, event: dict):
         try:
+            # print(f"==> BROADCASTING TO BROWSER: {event}") 
             await self.channel_layer.group_send(self.group_name, event)
         except Exception:
             pass
@@ -96,6 +97,8 @@ class AudioLoop:
         while not self._stop.is_set():
             try:
                 item = await self.to_send.get()
+                # Seeing my second payload 
+                # print(f"--> SENDING TO GEMINI: {item['mime_type']}, {len(item['data'])} bytes")
                 await self.session.send(input=item)
             except asyncio.CancelledError:
                 break
@@ -106,6 +109,7 @@ class AudioLoop:
         while not self._stop.is_set():
             try:
                 async for resp in self.session.receive():
+                    # print(f"<-- RECEIVED FROM GEMINI: {resp}")
                     sc = getattr(resp, "server_content", None)
                     if not sc:
                         continue
