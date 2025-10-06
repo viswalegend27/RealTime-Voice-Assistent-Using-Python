@@ -110,6 +110,13 @@ class AudioLoop:
             try:
                 async for resp in self.session.receive():
                     # print(f"<-- RECEIVED FROM GEMINI: {resp}")
+                    # print("\n" + "="*20 + " NEW OBJECT RECEIVED " + "="*20)
+                    # print(f"Object Type: {type(resp)}")
+                    # print("--- Full Object Content ---")
+                    # print(resp)
+                    # print("--- Available Attributes ---")
+                    # print(dir(resp))
+                    # print("="*60 + "\n")
                     sc = getattr(resp, "server_content", None)
                     if not sc:
                         continue
@@ -173,6 +180,8 @@ class AudioLoop:
 
     async def play_audio(self):
         if self.browser_mode:
+            # It does not plays out the sound in browser mode.
+            # Plays the audio in the terminal the below does that
             return
         stream = None
         try:
