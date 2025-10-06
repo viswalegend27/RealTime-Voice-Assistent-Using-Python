@@ -94,7 +94,9 @@
    * @param {'user' | 'assistant'} role The role whose transcript is being updated.
    * @param {string} incomingText The new text from the server.
    */
+  // This main function, called from the WebSocket handler, first checks whether the speaker has changed — for instance, if the assistant was speaking (activeRole === 'assistant') and a new user message arrives, it recognizes the role switch and starts a new paragraph accordingly.
   function upsertTranscript(role, incomingText) {
+    // startNewTurn(role) - The Paragraph Creator
     if (activeRole !== role || !lastMsgEl[role]) startNewTurn(role);
     const merged = smartMerge(buffers[role] || '', String(incomingText || ''));
     if (merged !== buffers[role]) {
@@ -162,6 +164,7 @@
     // This is the central message dispatcher from the server.
     ws.onmessage = (e) => {
       let data;
+      // '{"type": "transcript.message", "role": "assistant", "text": "The weather is"}' <= The acutal JSON Parsed
       try { data = JSON.parse(e.data); } catch { return; }
 
       // Handle speaking status updates.
