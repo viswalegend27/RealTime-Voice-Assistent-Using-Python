@@ -1,4 +1,3 @@
-# voiceapp/management/commands/voice_assistant.py
 import asyncio
 import time
 import base64
@@ -7,17 +6,7 @@ from channels.layers import get_channel_layer
 from django.core.management.base import BaseCommand  # kept for compatibility with your imports
 from voiceapp.db_helpers import getlatest, gethistory, getsave_message
 from google import genai
-
-# ---- Try multiple locations for AGENT_PROMPT without breaking imports ----
-try:
-    # If you keep constants at project level
-    from voiceproject.constants import AGENT_PROMPT  # type: ignore
-except Exception:
-    try:
-        # If you keep constants inside the app
-        from ...constants import AGENT_PROMPT  # type: ignore
-    except Exception:
-        AGENT_PROMPT = getattr(settings, "AGENT_PROMPT", "You are a helpful voice assistant.")
+from ...constants import AGENT_PROMPT 
 
 # ====== AUDIO & MODEL CONFIG (browser-only) ======
 SEND_RATE = 16000     # browser -> server mic
@@ -36,13 +25,6 @@ HEARTBEAT_PERIOD_S = 0.2
 
 
 class AudioLoop:
-    """
-    Browser-only live audio loop:
-      - Accepts PCM from browser via push_client_audio()
-      - Streams to Gemini Live
-      - Emits TTS audio + rolling transcripts back to browser via Channels
-      - Persists transcripts using db_helpers (optional but kept for compatibility)
-    """
     def __init__(self, pya_instance, stdout, browser_mode=False, group_name="voice_transcripts"):
         # pya_instance/browser_mode kept for signature compatibility; PyAudio is not used
         self.stdout = stdout
