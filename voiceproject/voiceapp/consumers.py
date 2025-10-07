@@ -4,7 +4,7 @@ import uuid
 import asyncio
 import base64
 from channels.generic.websocket import AsyncWebsocketConsumer
-from .management.commands.voice_assistant import AudioLoop
+from .utils import AudioLoop
 
 PCM_SEND_RATE = 16000   # browser -> server (mic)
 PCM_RECV_RATE = 24000   # server -> browser (TTS)
