@@ -1,5 +1,7 @@
 /.env
 /ai-speech
+__pycache__/
+**/__pycache__/
 /voiceproject/db.sqlite3
 .idea/
 reference.txt

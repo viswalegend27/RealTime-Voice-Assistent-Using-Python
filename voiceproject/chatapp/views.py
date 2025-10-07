@@ -1,7 +1,7 @@
 from django.shortcuts import render
 from django.http import JsonResponse
 import asyncio
-from voiceapp.management.commands.voice_assistant import AudioLoop
+from voiceapp.utils import AudioLoop
 import pyaudio
 
 def index(request):
