@@ -33,13 +33,7 @@ HEARTBEAT_PERIOD_S = 0.2
 
 
 class AudioLoop:
-    """
-    Browser-only live audio loop:
-      - push_client_audio(...) called by WS consumer
-      - Streams to Gemini Live
-      - Emits TTS + transcripts via Channels
-      - Saves transcripts with db_helpers
-    """
+
     def __init__(self, pya_instance, stdout, browser_mode=False, group_name="voice_transcripts"):
         self.stdout = stdout
         self.browser_mode = True  # force browser mode

@@ -1,3 +1,4 @@
+# THIS FILE WAS MOVED FROM management/commands AS IT IS NOT CURRENTLY IN USE.
 import datetime
 from google.generativeai.protos import Tool, FunctionDeclaration, Schema
 from google.generativeai.types.content_types import ContentType
