@@ -27,7 +27,7 @@ client = genai.Client(
 )
 
 # Silence windows (ms) to commit rolling transcripts
-USER_SILENCE_MS = 700
+USER_SILENCE_MS = 300
 ASSIST_SILENCE_MS = 250
 HEARTBEAT_PERIOD_S = 0.2
 
